@@ -1,0 +1,382 @@
+pragma language_version >= 0.16 && <= 0.18;
+
+import CompactStandardLibrary;
+
+// NOTE:
+// - This contract is a **design skeleton** intended to mirror the patterns shown in `example-bboard`.
+// - Some container types (e.g., `Map`, `Vector`) and cross-contract calls will need to be aligned
+
+// ============ Enums ============
+
+export enum ReserveState {
+  INACTIVE,
+  ACTIVE,
+  PAUSED
+}
+
+export enum InterestRateMode {
+  NONE,
+  STABLE,
+  VARIABLE
+}
+
+// ============ Ledger State ============
+
+// Reserve data for each asset
+export ledger reserves: Map<Bytes<32>, ReserveData>;
+
+// User account data (private balances and positions)
+export ledger userAccounts: Map<Bytes<32>, UserAccountData>;
+
+// Pool administrator
+export ledger admin: Bytes<32>;
+
+// Interest rate model address
+export ledger interestRateModel: Bytes<32>;
+
+// Oracle address for price feeds
+export ledger oracle: Bytes<32>;
+
+// Sequence counter for nonce management
+export ledger sequence: Counter;
+
+// ============ Structs ============
+
+struct ReserveData {
+  state: ReserveState;
+  liquidityIndex: Opaque<U256>;  // Private for privacy
+  borrowIndex: Opaque<U256>;
+  currentLiquidityRate: Opaque<U256>;
+  currentBorrowRate: Opaque<U256>;
+  lastUpdateTimestamp: Opaque<U256>;
+  aTokenAddress: Bytes<32>;
+  totalLiquidity: Opaque<U256>;
+  totalBorrows: Opaque<U256>;
+}
+
+struct UserAccountData {
+  totalCollateralBase: Opaque<U256>;  // Private collateral value
+  totalDebtBase: Opaque<U256>;         // Private debt value
+  healthFactor: Opaque<U256>;           // Private health factor
+  collateralAssets: Vector<10, Bytes<32>>;  // List of collateral assets
+  borrowAssets: Vector<10, Bytes<32>>;      // List of borrowed assets
+}
+
+// ============ Constructor ============
+
+constructor(adminAddr: Bytes<32>, rateModelAddr: Bytes<32>, oracleAddr: Bytes<32>) {
+  admin = adminAddr;
+  interestRateModel = rateModelAddr;
+  oracle = oracleAddr;
+  sequence.increment(1);
+}
+
+// ============ Witness Declarations ============
+
+witness userSecretKey(): Bytes<32>;
+witness depositAmount(): Opaque<U256>;
+witness withdrawAmount(): Opaque<U256>;
+witness borrowAmount(): Opaque<U256>;
+witness repayAmount(): Opaque<U256>;
+
+// ============ Helper Functions ============
+
+export circuit getUserAddress(): Bytes<32> {
+  return publicKey(userSecretKey(), sequence as Field as Bytes<32>);
+}
+
+export circuit publicKey(sk: Bytes<32>, seq: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<3, Bytes<32>>>([pad(32, "lending:pk:"), seq, sk]);
+}
+
+// ============ Core Functions ============
+
+/**
+ * @notice Deposit assets into the pool
+ * @param asset The asset address (as Bytes<32>)
+ * @param amount The amount to deposit (private, as witness)
+ * @param onBehalfOf The address that will receive aTokens
+ */
+export circuit deposit(
+  asset: Bytes<32>,
+  onBehalfOf: Bytes<32>
+): [] {
+  const amount = depositAmount();
+  const userAddr = getUserAddress();
+  
+  // Validate amount
+  assert(disclose(amount) > 0, "Amount must be greater than 0");
+  
+  // Get or create reserve
+  let reserve = reserves.get(asset);
+  if (reserve.isNone()) {
+    // Initialize new reserve
+    reserve = some<ReserveData>(ReserveData {
+      state: ReserveState.ACTIVE,
+      liquidityIndex: opaque<U256>(1e27),  // Initial index scaled
+      borrowIndex: opaque<U256>(1e27),
+      currentLiquidityRate: opaque<U256>(0),
+      currentBorrowRate: opaque<U256>(0),
+      lastUpdateTimestamp: opaque<U256>(block.timestamp),
+      aTokenAddress: Bytes<32>(0),
+      totalLiquidity: opaque<U256>(0),
+      totalBorrows: opaque<U256>(0)
+    });
+  }
+  
+  let reserveData = reserve.value;
+  
+  // Update reserve state (accrue interest)
+  reserveData = updateReserveState(reserveData, asset);
+  
+  // Update total liquidity (private)
+  reserveData.totalLiquidity = opaque<U256>(
+    disclose(reserveData.totalLiquidity) + disclose(amount)
+  );
+  
+  // Mint aTokens (would call aToken contract)
+  // Note: In actual implementation, this would be a cross-contract call
+  
+  // Update user account data
+  updateUserAccountData(onBehalfOf);
+  
+  // Save reserve
+  reserves.set(asset, reserveData);
+}
+
+/**
+ * @notice Withdraw assets from the pool
+ * @param asset The asset address
+ * @param amount The amount to withdraw (private)
+ * @param to The recipient address
+ */
+export circuit withdraw(
+  asset: Bytes<32>,
+  to: Bytes<32>
+): [] {
+  const amount = withdrawAmount();
+  const userAddr = getUserAddress();
+  
+  assert(disclose(amount) > 0, "Amount must be greater than 0");
+  
+  let reserve = reserves.get(asset);
+  assert(reserve.isSome(), "Reserve not initialized");
+  
+  let reserveData = reserve.value;
+  assert(reserveData.state == ReserveState.ACTIVE, "Reserve not active");
+  
+  // Update reserve state
+  reserveData = updateReserveState(reserveData, asset);
+  
+  // Get user's aToken balance (would query aToken contract)
+  // For now, simplified - in reality would check aToken balance
+  
+  // Update total liquidity
+  reserveData.totalLiquidity = opaque<U256>(
+    disclose(reserveData.totalLiquidity) - disclose(amount)
+  );
+  
+  // Burn aTokens (would call aToken contract)
+  
+  // Update user account data
+  updateUserAccountData(userAddr);
+  
+  // Save reserve
+  reserves.set(asset, reserveData);
+}
+
+/**
+ * @notice Borrow assets from the pool
+ * @param asset The asset address
+ * @param amount The amount to borrow (private)
+ * @param rateMode The interest rate mode
+ */
+export circuit borrow(
+  asset: Bytes<32>,
+  rateMode: InterestRateMode
+): [] {
+  const amount = borrowAmount();
+  const userAddr = getUserAddress();
+  
+  assert(disclose(amount) > 0, "Amount must be greater than 0");
+  assert(rateMode == InterestRateMode.VARIABLE, "Only variable rate supported");
+  
+  let reserve = reserves.get(asset);
+  assert(reserve.isSome(), "Reserve not initialized");
+  
+  let reserveData = reserve.value;
+  assert(reserveData.state == ReserveState.ACTIVE, "Reserve not active");
+  
+  // Update reserve state
+  reserveData = updateReserveState(reserveData, asset);
+  
+  // Validate borrowing conditions (check collateral, health factor)
+  validateBorrow(userAddr, asset, amount);
+  
+  // Calculate borrow rate
+  const borrowRate = calculateBorrowRate(reserveData, asset);
+  
+  // Update borrow state
+  reserveData.totalBorrows = opaque<U256>(
+    disclose(reserveData.totalBorrows) + disclose(amount)
+  );
+  
+  // Update user account data
+  updateUserAccountData(userAddr);
+  
+  // Save reserve
+  reserves.set(asset, reserveData);
+}
+
+/**
+ * @notice Repay borrowed assets
+ * @param asset The asset address
+ * @param amount The amount to repay (private)
+ * @param rateMode The interest rate mode
+ */
+export circuit repay(
+  asset: Bytes<32>,
+  rateMode: InterestRateMode
+): [] {
+  const amount = repayAmount();
+  const userAddr = getUserAddress();
+  
+  assert(disclose(amount) > 0, "Amount must be greater than 0");
+  
+  let reserve = reserves.get(asset);
+  assert(reserve.isSome(), "Reserve not initialized");
+  
+  let reserveData = reserve.value;
+  
+  // Update reserve state
+  reserveData = updateReserveState(reserveData, asset);
+  
+  // Get user's debt (would query debt token contract)
+  // Simplified for now
+  
+  // Update borrow state
+  reserveData.totalBorrows = opaque<U256>(
+    disclose(reserveData.totalBorrows) - disclose(amount)
+  );
+  
+  // Update user account data
+  updateUserAccountData(userAddr);
+  
+  // Save reserve
+  reserves.set(asset, reserveData);
+}
+
+// ============ Internal Functions ============
+
+function updateReserveState(reserve: ReserveData, asset: Bytes<32>): ReserveData {
+  // Calculate time elapsed
+  const timeElapsed = block.timestamp - disclose(reserve.lastUpdateTimestamp);
+  
+  if (timeElapsed > 0) {
+    // Calculate new liquidity index based on liquidity rate
+    const liquidityRate = disclose(reserve.currentLiquidityRate);
+    // Note: use a plain seconds constant (avoid Solidity-style `365 days` literal)
+    const SECONDS_PER_YEAR = 31536000;
+    const newLiquidityIndex = disclose(reserve.liquidityIndex) * 
+      (1 + (liquidityRate * timeElapsed) / (SECONDS_PER_YEAR * 1e18));
+    
+    // Calculate new borrow index based on borrow rate
+    const borrowRate = disclose(reserve.currentBorrowRate);
+    const newBorrowIndex = disclose(reserve.borrowIndex) * 
+      (1 + (borrowRate * timeElapsed) / (SECONDS_PER_YEAR * 1e18));
+    
+    reserve.liquidityIndex = opaque<U256>(newLiquidityIndex);
+    reserve.borrowIndex = opaque<U256>(newBorrowIndex);
+  }
+  
+  // Update rates based on utilization
+  const rates = calculateInterestRates(reserve);
+  reserve.currentLiquidityRate = rates.liquidityRate;
+  reserve.currentBorrowRate = rates.borrowRate;
+  reserve.lastUpdateTimestamp = opaque<U256>(block.timestamp);
+  
+  return reserve;
+}
+
+function calculateInterestRates(reserve: ReserveData): { liquidityRate: Opaque<U256>, borrowRate: Opaque<U256> } {
+  const totalLiquidity = disclose(reserve.totalLiquidity);
+  const totalBorrows = disclose(reserve.totalBorrows);
+  
+  if (totalLiquidity == 0) {
+    return {
+      liquidityRate: opaque<U256>(0),
+      borrowRate: opaque<U256>(0)
+    };
+  }
+  
+  // Calculate utilization rate
+  const utilizationRate = (totalBorrows * 1e18) / totalLiquidity;
+  
+  // Calculate borrow rate based on utilization (simplified)
+  // In reality, would call interest rate model contract
+  let borrowRate: U256;
+  if (utilizationRate <= 0.8e18) {
+    // Below optimal: linear increase
+    borrowRate = 0.02e18 + (utilizationRate * 0.1e18) / 0.8e18;
+  } else {
+    // Above optimal: steeper increase
+    const excessUtilization = utilizationRate - 0.8e18;
+    borrowRate = 0.02e18 + 0.1e18 + (excessUtilization * 1e18) / 0.2e18;
+  }
+  
+  // Cap at maximum
+  if (borrowRate > 10e18) {
+    borrowRate = 10e18;
+  }
+  
+  // Calculate liquidity rate (suppliers earn portion of borrow rate)
+  const liquidityRate = (utilizationRate * borrowRate) / 1e18;
+  
+  return {
+    liquidityRate: opaque<U256>(liquidityRate),
+    borrowRate: opaque<U256>(borrowRate)
+  };
+}
+
+function calculateBorrowRate(reserve: ReserveData, asset: Bytes<32>): Opaque<U256> {
+  const rates = calculateInterestRates(reserve);
+  return rates.borrowRate;
+}
+
+function validateBorrow(userAddr: Bytes<32>, asset: Bytes<32>, amount: Opaque<U256>) {
+  // Get user account data
+  let account = userAccounts.get(userAddr);
+  
+  if (account.isNone()) {
+    // Create new account
+    account = some<UserAccountData>(UserAccountData {
+      totalCollateralBase: opaque<U256>(0),
+      totalDebtBase: opaque<U256>(0),
+      // Use a safe default > 1e18 for “no debt yet” paths in this skeleton.
+      // (Avoid `type(U256).max` which is Solidity-style and may not exist in Compact.)
+      healthFactor: opaque<U256>(2e18),
+      collateralAssets: Vector<10, Bytes<32>>([]),
+      borrowAssets: Vector<10, Bytes<32>>([])
+    });
+  }
+  
+  let accountData = account.value;
+  
+  // Calculate health factor after borrowing
+  // This would involve:
+  // 1. Getting collateral values from oracle (public prices)
+  // 2. Calculating total collateral value
+  // 3. Calculating total debt including new borrow
+  // 4. Health factor = (collateral * threshold) / debt
+  
+  // Simplified check - in reality would use ZK proofs
+  const healthFactor = disclose(accountData.healthFactor);
+  assert(healthFactor > 1e18, "Insufficient collateral");
+}
+
+function updateUserAccountData(userAddr: Bytes<32>) {
+  // Update user's account data based on current positions
+  // This would aggregate all collateral and debt positions
+  // Calculate health factor
+  // Save updated account data
+}
