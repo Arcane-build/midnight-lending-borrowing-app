@@ -53,23 +53,6 @@ Copy `.env.example` to `.env` and configure:
 - `PROOF_SERVER_URL` - Proof server URL
 - `CONTRACT_NAME` - Contract name
 
-### Project Structure
-
-```
-lending-borowing-app/
-├── contracts/
-│   ├── hello-world.compact    # Smart contract source
-│   └── managed/               # Compiled artifacts
-├── src/
-│   ├── deploy.ts             # Deployment script
-│   ├── cli.ts                # Interactive CLI
-│   ├── providers/            # Shared providers
-│   └── utils/                # Utility functions
-├── .env                      # Environment config (keep private!)
-├── deployment.json           # Deployment info
-└── package.json
-```
-
 ### Getting Testnet Tokens
 
 1. Run `npm run deploy` to see your wallet address
@@ -81,19 +64,3 @@ lending-borowing-app/
 - [Midnight Documentation](https://docs.midnight.network)
 - [Compact Language Guide](https://docs.midnight.network/compact)
 - [Tutorial Series](https://docs.midnight.network/tutorials)
-
-## Contract Overview
-
-This project includes a simple "Hello World" contract that:
-
-- Stores a message on the blockchain
-- Allows reading the current message
-- Demonstrates basic Midnight functionality
-
-The contract uses:
-
-- **Public ledger state** for the message
-- **Zero-knowledge proofs** for transactions
-- **Privacy-preserving** architecture
-
-Happy coding! 🌙

@@ -44,45 +44,51 @@ export ledger sequence: Counter;
 
 struct ReserveData {
   state: ReserveState;
-  liquidityIndex: Opaque<U256>;  // Private for privacy
-  borrowIndex: Opaque<U256>;
-  currentLiquidityRate: Opaque<U256>;
-  currentBorrowRate: Opaque<U256>;
-  lastUpdateTimestamp: Opaque<U256>;
+  liquidityIndex: Uint<128>;  // Using Uint<128> to avoid bound inference issues (2^128 is sufficient for token amounts)
+  borrowIndex: Uint<128>;
+  currentLiquidityRate: Uint<128>;
+  currentBorrowRate: Uint<128>;
+  lastUpdateTimestamp: Field;
   aTokenAddress: Bytes<32>;
-  totalLiquidity: Opaque<U256>;
-  totalBorrows: Opaque<U256>;
+  totalLiquidity: Uint<128>;
+  totalBorrows: Uint<128>;
 }
 
 struct UserAccountData {
-  totalCollateralBase: Opaque<U256>;  // Private collateral value
-  totalDebtBase: Opaque<U256>;         // Private debt value
-  healthFactor: Opaque<U256>;           // Private health factor
+  totalCollateralBase: Uint<128>;  // Using Uint<128> to avoid bound inference issues
+  totalDebtBase: Uint<128>;
+  healthFactor: Uint<128>;
   collateralAssets: Vector<10, Bytes<32>>;  // List of collateral assets
   borrowAssets: Vector<10, Bytes<32>>;      // List of borrowed assets
+}
+
+struct InterestRates {
+  liquidityRate: Uint<128>;
+  borrowRate: Uint<128>;
 }
 
 // ============ Constructor ============
 
 constructor(adminAddr: Bytes<32>, rateModelAddr: Bytes<32>, oracleAddr: Bytes<32>) {
-  admin = adminAddr;
-  interestRateModel = rateModelAddr;
-  oracle = oracleAddr;
+  admin = disclose(adminAddr);
+  interestRateModel = disclose(rateModelAddr);
+  oracle = disclose(oracleAddr);
   sequence.increment(1);
 }
 
 // ============ Witness Declarations ============
 
 witness userSecretKey(): Bytes<32>;
-witness depositAmount(): Opaque<U256>;
-witness withdrawAmount(): Opaque<U256>;
-witness borrowAmount(): Opaque<U256>;
-witness repayAmount(): Opaque<U256>;
+witness depositAmount(): Uint<128>;
+witness withdrawAmount(): Uint<128>;
+witness borrowAmount(): Uint<128>;
+witness repayAmount(): Uint<128>;
+witness currentTimestamp(): Field;
 
 // ============ Helper Functions ============
 
 export circuit getUserAddress(): Bytes<32> {
-  return publicKey(userSecretKey(), sequence as Field as Bytes<32>);
+  return disclose(publicKey(userSecretKey(), sequence as Field as Bytes<32>));
 }
 
 export circuit publicKey(sk: Bytes<32>, seq: Bytes<32>): Bytes<32> {
@@ -105,43 +111,55 @@ export circuit deposit(
   const userAddr = getUserAddress();
   
   // Validate amount
-  assert(disclose(amount) > 0, "Amount must be greater than 0");
+  assert(amount > 0, "Amount must be greater than 0");
   
   // Get or create reserve
-  let reserve = reserves.get(asset);
-  if (reserve.isNone()) {
-    // Initialize new reserve
-    reserve = some<ReserveData>(ReserveData {
+  // NOTE: Map.lookup() returns the value directly (or default if not found)
+  const currentReserve = reserves.lookup(disclose(asset));
+  const reserveData = currentReserve.state == ReserveState.INACTIVE ?
+    ReserveData {
       state: ReserveState.ACTIVE,
-      liquidityIndex: opaque<U256>(1e27),  // Initial index scaled
-      borrowIndex: opaque<U256>(1e27),
-      currentLiquidityRate: opaque<U256>(0),
-      currentBorrowRate: opaque<U256>(0),
-      lastUpdateTimestamp: opaque<U256>(block.timestamp),
-      aTokenAddress: Bytes<32>(0),
-      totalLiquidity: opaque<U256>(0),
-      totalBorrows: opaque<U256>(0)
-    });
-  }
-  
-  let reserveData = reserve.value;
+      liquidityIndex: ((1000000000000000000 as Field) as Uint<128>),  // Initial index scaled (1e18)
+      borrowIndex: ((1000000000000000000 as Field) as Uint<128>),
+      currentLiquidityRate: (0 as Uint<128>),
+      currentBorrowRate: (0 as Uint<128>),
+      lastUpdateTimestamp: disclose(currentTimestamp()),
+      aTokenAddress: Bytes[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      totalLiquidity: (0 as Uint<128>),
+      totalBorrows: (0 as Uint<128>)
+    } : currentReserve;
   
   // Update reserve state (accrue interest)
-  reserveData = updateReserveState(reserveData, asset);
+  const updatedReserveData = updateReserveState(reserveData, asset);
   
-  // Update total liquidity (private)
-  reserveData.totalLiquidity = opaque<U256>(
-    disclose(reserveData.totalLiquidity) + disclose(amount)
-  );
+  // Update total liquidity - disclose witness-derived amount in computation
+  // NOTE: Use Field for arithmetic to avoid bound issues, then cast to Uint<128> for storage
+  const disclosedAmount = disclose(amount);
+  const totalLiquidityField = (updatedReserveData.totalLiquidity as Field);
+  const amountField = (disclosedAmount as Field);
+  const newTotalLiquidityField = totalLiquidityField + amountField;
+  const newTotalLiquidity = (newTotalLiquidityField as Uint<128>);
+  // Explicitly construct struct to avoid bound inference from spread operator
+  const finalReserveData = ReserveData {
+    state: updatedReserveData.state,
+    liquidityIndex: updatedReserveData.liquidityIndex,
+    borrowIndex: updatedReserveData.borrowIndex,
+    currentLiquidityRate: updatedReserveData.currentLiquidityRate,
+    currentBorrowRate: updatedReserveData.currentBorrowRate,
+    lastUpdateTimestamp: updatedReserveData.lastUpdateTimestamp,
+    aTokenAddress: updatedReserveData.aTokenAddress,
+    totalLiquidity: newTotalLiquidity,
+    totalBorrows: updatedReserveData.totalBorrows
+  };
   
   // Mint aTokens (would call aToken contract)
   // Note: In actual implementation, this would be a cross-contract call
   
   // Update user account data
-  updateUserAccountData(onBehalfOf);
+  updateUserAccountData(disclose(onBehalfOf));
   
-  // Save reserve
-  reserves.set(asset, reserveData);
+  // Save reserve - asset and struct values are public (Uint<128> not Opaque)
+  reserves.insert(disclose(asset), finalReserveData);
 }
 
 /**
@@ -157,32 +175,44 @@ export circuit withdraw(
   const amount = withdrawAmount();
   const userAddr = getUserAddress();
   
-  assert(disclose(amount) > 0, "Amount must be greater than 0");
+  assert(amount > 0, "Amount must be greater than 0");
   
-  let reserve = reserves.get(asset);
-  assert(reserve.isSome(), "Reserve not initialized");
-  
-  let reserveData = reserve.value;
+  const reserveData = reserves.lookup(disclose(asset));
   assert(reserveData.state == ReserveState.ACTIVE, "Reserve not active");
   
   // Update reserve state
-  reserveData = updateReserveState(reserveData, asset);
+  const updatedReserveData = updateReserveState(reserveData, disclose(asset));
   
   // Get user's aToken balance (would query aToken contract)
   // For now, simplified - in reality would check aToken balance
   
-  // Update total liquidity
-  reserveData.totalLiquidity = opaque<U256>(
-    disclose(reserveData.totalLiquidity) - disclose(amount)
-  );
+  // Update total liquidity - disclose witness-derived amount in computation
+  // NOTE: Use Field for arithmetic to avoid bound issues, then cast to Uint<128> for storage
+  const disclosedAmount = disclose(amount);
+  const totalLiquidityField = (updatedReserveData.totalLiquidity as Field);
+  const amountField = (disclosedAmount as Field);
+  const newTotalLiquidityField = totalLiquidityField - amountField;
+  const newTotalLiquidity = (newTotalLiquidityField as Uint<128>);
+  // Explicitly construct struct to avoid bound inference from spread operator
+  const finalReserveData = ReserveData {
+    state: updatedReserveData.state,
+    liquidityIndex: updatedReserveData.liquidityIndex,
+    borrowIndex: updatedReserveData.borrowIndex,
+    currentLiquidityRate: updatedReserveData.currentLiquidityRate,
+    currentBorrowRate: updatedReserveData.currentBorrowRate,
+    lastUpdateTimestamp: updatedReserveData.lastUpdateTimestamp,
+    aTokenAddress: updatedReserveData.aTokenAddress,
+    totalLiquidity: newTotalLiquidity,
+    totalBorrows: updatedReserveData.totalBorrows
+  };
   
   // Burn aTokens (would call aToken contract)
   
   // Update user account data
-  updateUserAccountData(userAddr);
+  updateUserAccountData(disclose(userAddr));
   
-  // Save reserve
-  reserves.set(asset, reserveData);
+  // Save reserve - asset and struct values are public (Uint<128> not Opaque)
+  reserves.insert(disclose(asset), finalReserveData);
 }
 
 /**
@@ -198,34 +228,46 @@ export circuit borrow(
   const amount = borrowAmount();
   const userAddr = getUserAddress();
   
-  assert(disclose(amount) > 0, "Amount must be greater than 0");
+  assert(amount > 0, "Amount must be greater than 0");
   assert(rateMode == InterestRateMode.VARIABLE, "Only variable rate supported");
   
-  let reserve = reserves.get(asset);
-  assert(reserve.isSome(), "Reserve not initialized");
-  
-  let reserveData = reserve.value;
+  const reserveData = reserves.lookup(disclose(asset));
   assert(reserveData.state == ReserveState.ACTIVE, "Reserve not active");
   
   // Update reserve state
-  reserveData = updateReserveState(reserveData, asset);
+  const updatedReserveData = updateReserveState(reserveData, disclose(asset));
   
   // Validate borrowing conditions (check collateral, health factor)
-  validateBorrow(userAddr, asset, amount);
+  validateBorrow(disclose(userAddr), disclose(asset), amount);
   
   // Calculate borrow rate
-  const borrowRate = calculateBorrowRate(reserveData, asset);
+  const borrowRate = calculateBorrowRate(updatedReserveData, disclose(asset));
   
-  // Update borrow state
-  reserveData.totalBorrows = opaque<U256>(
-    disclose(reserveData.totalBorrows) + disclose(amount)
-  );
+  // Update borrow state - disclose witness-derived amount in computation
+  // NOTE: Use Field for arithmetic to avoid bound issues, then cast to Uint<128> for storage
+  const disclosedAmount = disclose(amount);
+  const totalBorrowsField = (updatedReserveData.totalBorrows as Field);
+  const amountField = (disclosedAmount as Field);
+  const newTotalBorrowsField = totalBorrowsField + amountField;
+  const newTotalBorrows = (newTotalBorrowsField as Uint<128>);
+  // Explicitly construct struct to avoid bound inference from spread operator
+  const finalReserveData = ReserveData {
+    state: updatedReserveData.state,
+    liquidityIndex: updatedReserveData.liquidityIndex,
+    borrowIndex: updatedReserveData.borrowIndex,
+    currentLiquidityRate: updatedReserveData.currentLiquidityRate,
+    currentBorrowRate: updatedReserveData.currentBorrowRate,
+    lastUpdateTimestamp: updatedReserveData.lastUpdateTimestamp,
+    aTokenAddress: updatedReserveData.aTokenAddress,
+    totalLiquidity: updatedReserveData.totalLiquidity,
+    totalBorrows: newTotalBorrows
+  };
   
   // Update user account data
-  updateUserAccountData(userAddr);
+  updateUserAccountData(disclose(userAddr));
   
-  // Save reserve
-  reserves.set(asset, reserveData);
+  // Save reserve - asset and struct values are public (Uint<128> not Opaque)
+  reserves.insert(disclose(asset), finalReserveData);
 }
 
 /**
@@ -241,126 +283,119 @@ export circuit repay(
   const amount = repayAmount();
   const userAddr = getUserAddress();
   
-  assert(disclose(amount) > 0, "Amount must be greater than 0");
+  assert(amount > 0, "Amount must be greater than 0");
   
-  let reserve = reserves.get(asset);
-  assert(reserve.isSome(), "Reserve not initialized");
-  
-  let reserveData = reserve.value;
+  const reserveData = reserves.lookup(disclose(asset));
   
   // Update reserve state
-  reserveData = updateReserveState(reserveData, asset);
+  const updatedReserveData = updateReserveState(reserveData, disclose(asset));
   
   // Get user's debt (would query debt token contract)
   // Simplified for now
   
-  // Update borrow state
-  reserveData.totalBorrows = opaque<U256>(
-    disclose(reserveData.totalBorrows) - disclose(amount)
-  );
+  // Update borrow state - disclose witness-derived amount in computation
+  // NOTE: Use Field for arithmetic to avoid bound issues, then cast to Uint<128> for storage
+  const disclosedAmount = disclose(amount);
+  const totalBorrowsField = (updatedReserveData.totalBorrows as Field);
+  const amountField = (disclosedAmount as Field);
+  const newTotalBorrowsField = totalBorrowsField - amountField;
+  const newTotalBorrows = (newTotalBorrowsField as Uint<128>);
+  // Explicitly construct struct to avoid bound inference from spread operator
+  const finalReserveData = ReserveData {
+    state: updatedReserveData.state,
+    liquidityIndex: updatedReserveData.liquidityIndex,
+    borrowIndex: updatedReserveData.borrowIndex,
+    currentLiquidityRate: updatedReserveData.currentLiquidityRate,
+    currentBorrowRate: updatedReserveData.currentBorrowRate,
+    lastUpdateTimestamp: updatedReserveData.lastUpdateTimestamp,
+    aTokenAddress: updatedReserveData.aTokenAddress,
+    totalLiquidity: updatedReserveData.totalLiquidity,
+    totalBorrows: newTotalBorrows
+  };
   
   // Update user account data
-  updateUserAccountData(userAddr);
+  updateUserAccountData(disclose(userAddr));
   
-  // Save reserve
-  reserves.set(asset, reserveData);
+  // Save reserve - asset and struct values are public (Uint<128> not Opaque)
+  reserves.insert(disclose(asset), finalReserveData);
 }
 
-// ============ Internal Functions ============
+// ============ Internal Circuits ============
 
-function updateReserveState(reserve: ReserveData, asset: Bytes<32>): ReserveData {
-  // Calculate time elapsed
-  const timeElapsed = block.timestamp - disclose(reserve.lastUpdateTimestamp);
-  
-  if (timeElapsed > 0) {
-    // Calculate new liquidity index based on liquidity rate
-    const liquidityRate = disclose(reserve.currentLiquidityRate);
-    // Note: use a plain seconds constant (avoid Solidity-style `365 days` literal)
-    const SECONDS_PER_YEAR = 31536000;
-    const newLiquidityIndex = disclose(reserve.liquidityIndex) * 
-      (1 + (liquidityRate * timeElapsed) / (SECONDS_PER_YEAR * 1e18));
-    
-    // Calculate new borrow index based on borrow rate
-    const borrowRate = disclose(reserve.currentBorrowRate);
-    const newBorrowIndex = disclose(reserve.borrowIndex) * 
-      (1 + (borrowRate * timeElapsed) / (SECONDS_PER_YEAR * 1e18));
-    
-    reserve.liquidityIndex = opaque<U256>(newLiquidityIndex);
-    reserve.borrowIndex = opaque<U256>(newBorrowIndex);
-  }
-  
-  // Update rates based on utilization
-  const rates = calculateInterestRates(reserve);
-  reserve.currentLiquidityRate = rates.liquidityRate;
-  reserve.currentBorrowRate = rates.borrowRate;
-  reserve.lastUpdateTimestamp = opaque<U256>(block.timestamp);
-  
-  return reserve;
-}
-
-function calculateInterestRates(reserve: ReserveData): { liquidityRate: Opaque<U256>, borrowRate: Opaque<U256> } {
-  const totalLiquidity = disclose(reserve.totalLiquidity);
-  const totalBorrows = disclose(reserve.totalBorrows);
-  
-  if (totalLiquidity == 0) {
-    return {
-      liquidityRate: opaque<U256>(0),
-      borrowRate: opaque<U256>(0)
-    };
-  }
-  
-  // Calculate utilization rate
-  const utilizationRate = (totalBorrows * 1e18) / totalLiquidity;
-  
-  // Calculate borrow rate based on utilization (simplified)
-  // In reality, would call interest rate model contract
-  let borrowRate: U256;
-  if (utilizationRate <= 0.8e18) {
-    // Below optimal: linear increase
-    borrowRate = 0.02e18 + (utilizationRate * 0.1e18) / 0.8e18;
-  } else {
-    // Above optimal: steeper increase
-    const excessUtilization = utilizationRate - 0.8e18;
-    borrowRate = 0.02e18 + 0.1e18 + (excessUtilization * 1e18) / 0.2e18;
-  }
-  
-  // Cap at maximum
-  if (borrowRate > 10e18) {
-    borrowRate = 10e18;
-  }
-  
-  // Calculate liquidity rate (suppliers earn portion of borrow rate)
-  const liquidityRate = (utilizationRate * borrowRate) / 1e18;
-  
-  return {
-    liquidityRate: opaque<U256>(liquidityRate),
-    borrowRate: opaque<U256>(borrowRate)
+circuit createDefaultReserve(): ReserveData {
+  return ReserveData {
+    state: ReserveState.ACTIVE,
+    liquidityIndex: ((1000000000000000000 as Field) as Uint<128>),  // Initial index scaled (1e18)
+    borrowIndex: ((1000000000000000000 as Field) as Uint<128>),
+    currentLiquidityRate: (0 as Uint<128>),
+    currentBorrowRate: (0 as Uint<128>),
+      lastUpdateTimestamp: currentTimestamp(),
+      aTokenAddress: Bytes[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    totalLiquidity: (0 as Uint<128>),
+    totalBorrows: (0 as Uint<128>)
   };
 }
 
-function calculateBorrowRate(reserve: ReserveData, asset: Bytes<32>): Opaque<U256> {
+circuit updateReserveState(reserve: ReserveData, asset: Bytes<32>): ReserveData {
+  // NOTE: Compact does not support division (/), so interest accrual calculations
+  // are simplified. In a production implementation, this would need to be handled
+  // differently (e.g., via witness functions or pre-computed lookup tables).
+  
+  // Update rates based on utilization
+  const rates = calculateInterestRates(reserve);
+  
+  // Disclose timestamp witness before assigning to ledger
+  const timestamp = disclose(currentTimestamp());
+  
+  // Explicitly construct struct to avoid bound inference from spread operator
+  return ReserveData {
+    state: reserve.state,
+    liquidityIndex: reserve.liquidityIndex,
+    borrowIndex: reserve.borrowIndex,
+    currentLiquidityRate: rates.liquidityRate,
+    currentBorrowRate: rates.borrowRate,
+    lastUpdateTimestamp: timestamp,
+    aTokenAddress: reserve.aTokenAddress,
+    totalLiquidity: reserve.totalLiquidity,
+    totalBorrows: reserve.totalBorrows
+  };
+}
+
+circuit calculateInterestRates(reserve: ReserveData): InterestRates {
+  // Cast to Field first to avoid any bound inference issues
+  const totalLiquidity = (reserve.totalLiquidity as Field);
+  const totalBorrows = (reserve.totalBorrows as Field);
+  
+  // Compare Field with 0 (cast 0 to Field to avoid bound inference)
+  if (totalLiquidity == (0 as Field)) {
+    return InterestRates {
+      liquidityRate: (0 as Uint<128>),
+      borrowRate: (0 as Uint<128>)
+    };
+  }
+  
+  // NOTE: Compact does not support division (/). Utilization rate calculation
+  // is simplified. In production, this would use witness functions or pre-computed values.
+  // Fixed rates for now (would be dynamic in production based on utilization)
+  // Cast large literals through Field to avoid bound issues
+  const borrowRate = ((50000000000000000 as Field) as Uint<128>); // 5% annual rate
+  const liquidityRate = ((25000000000000000 as Field) as Uint<128>); // 2.5% annual rate
+  
+  return InterestRates {
+    liquidityRate: liquidityRate,
+    borrowRate: borrowRate
+  };
+}
+
+circuit calculateBorrowRate(reserve: ReserveData, asset: Bytes<32>): Uint<128> {
   const rates = calculateInterestRates(reserve);
   return rates.borrowRate;
 }
 
-function validateBorrow(userAddr: Bytes<32>, asset: Bytes<32>, amount: Opaque<U256>) {
+circuit validateBorrow(userAddr: Bytes<32>, asset: Bytes<32>, amount: Uint<128>): [] {
   // Get user account data
-  let account = userAccounts.get(userAddr);
-  
-  if (account.isNone()) {
-    // Create new account
-    account = some<UserAccountData>(UserAccountData {
-      totalCollateralBase: opaque<U256>(0),
-      totalDebtBase: opaque<U256>(0),
-      // Use a safe default > 1e18 for “no debt yet” paths in this skeleton.
-      // (Avoid `type(U256).max` which is Solidity-style and may not exist in Compact.)
-      healthFactor: opaque<U256>(2e18),
-      collateralAssets: Vector<10, Bytes<32>>([]),
-      borrowAssets: Vector<10, Bytes<32>>([])
-    });
-  }
-  
-  let accountData = account.value;
+  // Get user account data (Map.lookup returns value directly or default)
+  const accountData = userAccounts.lookup(disclose(userAddr));
   
   // Calculate health factor after borrowing
   // This would involve:
@@ -370,11 +405,16 @@ function validateBorrow(userAddr: Bytes<32>, asset: Bytes<32>, amount: Opaque<U2
   // 4. Health factor = (collateral * threshold) / debt
   
   // Simplified check - in reality would use ZK proofs
-  const healthFactor = disclose(accountData.healthFactor);
-  assert(healthFactor > 1e18, "Insufficient collateral");
+  // Cast to Field first to avoid any bound inference issues, then cast back to Uint<128> for comparison
+  // (Relational operators only work on Uint types, not Field)
+  const healthFactorField = (accountData.healthFactor as Field);
+  const minHealthFactorField = (1000000000000000000 as Field);
+  const healthFactor = (healthFactorField as Uint<128>);
+  const minHealthFactor = (minHealthFactorField as Uint<128>);
+  assert(healthFactor > minHealthFactor, "Insufficient collateral");
 }
 
-function updateUserAccountData(userAddr: Bytes<32>) {
+circuit updateUserAccountData(userAddr: Bytes<32>): [] {
   // Update user's account data based on current positions
   // This would aggregate all collateral and debt positions
   // Calculate health factor
