@@ -50,7 +50,7 @@ const waitForFunds = (wallet: Wallet) =>
 async function main() {
   console.log();
   console.log(chalk.blue.bold("━".repeat(60)));
-  console.log(chalk.blue.bold("🌙  lending-borowing-app Deployment"));
+  console.log(chalk.blue.bold("🌙  AToken Deployment"));
   console.log(chalk.blue.bold("━".repeat(60)));
   console.log();
 
@@ -59,11 +59,11 @@ async function main() {
     EnvironmentManager.validateEnvironment();
 
     const networkConfig = EnvironmentManager.getNetworkConfig();
-    const contractName = process.env.CONTRACT_NAME || "lending-pool";
+    const contractName = process.env.TOKEN_CONTRACT_NAME || "atoken";
 
     // Check if contract is compiled
     if (!EnvironmentManager.checkContractCompiled(contractName)) {
-      console.error("❌ Contract not compiled! Run: npm run compile");
+      console.error("❌ Contract not compiled! Run: npm run compile:token");
       process.exit(1);
     }
 
@@ -111,7 +111,7 @@ async function main() {
       console.log(chalk.white("   • ") + chalk.cyan("Let this script wait (it will auto-detect when funds arrive)"));
       console.log(chalk.white("   • ") + chalk.cyan("OR press ") + chalk.yellow("Ctrl+C") + chalk.cyan(" to stop, then check balance with:"));
       console.log(chalk.yellow.bold("     npm run check-balance"));
-      console.log(chalk.white("   • ") + chalk.cyan("Once funded, run: ") + chalk.yellow.bold("npm run deploy"));
+      console.log(chalk.white("   • ") + chalk.cyan("Once funded, run: ") + chalk.yellow.bold("npm run deploy:token"));
       console.log();
       console.log(chalk.blue("⏳ Waiting to receive tokens..."));
       balance = await waitForFunds(wallet);
@@ -131,23 +131,20 @@ async function main() {
       "index.cjs"
     );
 
-    const LendingPoolModule = await import(contractModulePath);
+    const ATokenModule = await import(contractModulePath);
     
-    // Create placeholder addresses for constructor (32 bytes each)
-    // In production, these would be actual contract addresses
-    // For now, using placeholder values - these should be replaced with real addresses
-    const adminAddr = Buffer.alloc(32, 0x01);
-    const rateModelAddr = Buffer.alloc(32, 0x02);
-    const oracleAddr = Buffer.alloc(32, 0x03);
+    // Get token deployment parameters from environment or use defaults
+    const tokenName = process.env.TOKEN_NAME || "aToken";
+    const tokenSymbol = process.env.TOKEN_SYMBOL || "aTKN";
+    const tokenDecimals = parseInt(process.env.TOKEN_DECIMALS || "18");
     
-    // Owner address for Ownable (typically same as admin or a multisig)
-    // Note: Ownable expects Either<ZswapCoinPublicKey, ContractAddress>
-    // For now, using a placeholder - in production this would be a real public key
-    const ownerAddr = Buffer.alloc(32, 0x01); // Using same as admin for simplicity
+    // Create placeholder addresses for constructor
+    // In production, these would be actual addresses
+    const ownerAddr = Buffer.alloc(32, 0x01); // Owner (can pause/unpause)
+    const lendingPoolAddr = Buffer.alloc(32, 0x02); // Lending pool (can mint/burn)
     
     // Create contract instance with minimal witness functions for deployment
-    // (Constructor doesn't use witnesses, only the initial state)
-    const contractInstance = new LendingPoolModule.Contract({
+    const contractInstance = new ATokenModule.Contract({
       userSecretKey: async (context: any) => [context.privateState, Buffer.alloc(32)],
       depositAmount: async (context: any) => [context.privateState, 0n],
       withdrawAmount: async (context: any) => [context.privateState, 0n],
@@ -156,6 +153,10 @@ async function main() {
       currentTimestamp: async (context: any) => {
         const timestamp = BigInt(Math.floor(Date.now() / 1000));
         return [context.privateState, timestamp];
+      },
+      callerAddress: async (context: any) => {
+        // For deployment, return a placeholder
+        return [context.privateState, Buffer.alloc(32)];
       },
     });
 
@@ -197,31 +198,46 @@ async function main() {
     });
 
     // Deploy contract to blockchain
-    console.log(chalk.blue("🚀 Deploying contract (30-60 seconds)..."));
+    console.log(chalk.blue("🚀 Deploying AToken contract (30-60 seconds)..."));
     console.log();
-    console.log(chalk.yellow("⚠️  Note: Constructor requires admin, rate model, oracle, and owner addresses."));
+    console.log(chalk.yellow("⚠️  Note: Constructor requires name, symbol, decimals, owner, and lending pool addresses."));
     console.log(chalk.yellow("   Using placeholder addresses for deployment..."));
-    console.log(chalk.gray(`   Admin: ${Buffer.from(adminAddr).toString("hex")}`));
-    console.log(chalk.gray(`   Rate Model: ${Buffer.from(rateModelAddr).toString("hex")}`));
-    console.log(chalk.gray(`   Oracle: ${Buffer.from(oracleAddr).toString("hex")}`));
+    console.log();
+    console.log(chalk.cyan("Token Parameters:"));
+    console.log(chalk.gray(`   Name: ${tokenName}`));
+    console.log(chalk.gray(`   Symbol: ${tokenSymbol}`));
+    console.log(chalk.gray(`   Decimals: ${tokenDecimals}`));
+    console.log();
+    console.log(chalk.cyan("Addresses:"));
     console.log(chalk.gray(`   Owner: ${Buffer.from(ownerAddr).toString("hex")}`));
+    console.log(chalk.gray(`   Lending Pool: ${Buffer.from(lendingPoolAddr).toString("hex")}`));
     console.log();
 
     // Deploy contract
     // Note: Constructor arguments need to be provided via initialState
-    // The deployContract function will call the contract's initialState method
-    // We need to override the contract's initialState to pass constructor args
-    // Constructor now requires: adminAddr, rateModelAddr, oracleAddr, owner
+    // AToken constructor: _name: Opaque<"string">, _symbol: Opaque<"string">, _decimals: Uint<8>, 
+    //                    _owner: Either<ZswapCoinPublicKey, ContractAddress>, 
+    //                    _lendingPool: Either<ZswapCoinPublicKey, ContractAddress>
+    // In TypeScript, strings are automatically converted to Opaque<"string"> by the runtime
     const contractWithInitialState = {
       ...contractInstance,
       initialState: (context: any) => {
-        return contractInstance.initialState(context, adminAddr, rateModelAddr, oracleAddr, ownerAddr);
+        // Strings are automatically converted to Opaque<"string"> by the Compact runtime
+        // ownerAddr and lendingPoolAddr are Uint8Array (32 bytes) which represent addresses
+        return contractInstance.initialState(
+          context,
+          tokenName,  // Will be converted to Opaque<"string">
+          tokenSymbol, // Will be converted to Opaque<"string">
+          tokenDecimals,
+          ownerAddr,  // Either<ZswapCoinPublicKey, ContractAddress>
+          lendingPoolAddr // Either<ZswapCoinPublicKey, ContractAddress>
+        );
       },
     };
 
     const deployed = await deployContract(providers, {
       contract: contractWithInitialState as any,
-      privateStateId: "lendingPoolState",
+      privateStateId: "atokenState",
       initialPrivateState: {},
     });
 
@@ -230,11 +246,16 @@ async function main() {
     // Save deployment information
     console.log();
     console.log(chalk.green.bold("━".repeat(60)));
-    console.log(chalk.green.bold("🎉 CONTRACT DEPLOYED SUCCESSFULLY!"));
+    console.log(chalk.green.bold("🎉 AToken CONTRACT DEPLOYED SUCCESSFULLY!"));
     console.log(chalk.green.bold("━".repeat(60)));
     console.log();
     console.log(chalk.cyan.bold("📍 Contract Address:"));
     console.log(chalk.white(`   ${contractAddress}`));
+    console.log();
+    console.log(chalk.cyan.bold("📋 Token Details:"));
+    console.log(chalk.white(`   Name: ${tokenName}`));
+    console.log(chalk.white(`   Symbol: ${tokenSymbol}`));
+    console.log(chalk.white(`   Decimals: ${tokenDecimals}`));
     console.log();
 
     const info = {
@@ -242,10 +263,15 @@ async function main() {
       deployedAt: new Date().toISOString(),
       network: networkConfig.name,
       contractName,
+      tokenName,
+      tokenSymbol,
+      tokenDecimals,
+      owner: Buffer.from(ownerAddr).toString("hex"),
+      lendingPool: Buffer.from(lendingPoolAddr).toString("hex"),
     };
 
-    fs.writeFileSync("deployment.json", JSON.stringify(info, null, 2));
-    console.log(chalk.gray("✅ Saved to deployment.json"));
+    fs.writeFileSync("token-deployment.json", JSON.stringify(info, null, 2));
+    console.log(chalk.gray("✅ Saved to token-deployment.json"));
     console.log();
 
     // Close wallet connection
@@ -260,3 +286,4 @@ async function main() {
 }
 
 main().catch(console.error);
+

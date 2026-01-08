@@ -20,6 +20,7 @@ contracts/managed/
 
 # Deployment info
 deployment.json
+token-deployment.json
 
 # OS generated files
 .DS_Store

@@ -35,23 +35,40 @@ A Midnight Network application created with `create-mn-app`.
 
 ### Available Scripts
 
-- `npm run setup` - Compile, build, and deploy contract
-- `npm run compile` - Compile Compact contract
+**Lending Pool:**
+- `npm run compile` - Compile lending pool contract
+- `npm run deploy` - Deploy lending pool to testnet
+
+**AToken:**
+- `npm run compile:token` - Compile AToken contract
+- `npm run deploy:token` - Deploy AToken to testnet
+
+**General:**
+- `npm run setup` - Compile, build, and deploy lending pool
+- `npm run compile:all` - Compile all contracts (pool + token)
 - `npm run build` - Build TypeScript
-- `npm run deploy` - Deploy contract to testnet
-- `npm run cli` - Interactive CLI for contract
+- `npm run cli` - Interactive CLI for lending pool
 - `npm run check-balance` - Check wallet balance
 - `npm run reset` - Reset all compiled/built files
+- `npm run reset:all` - Reset all files including token deployments
 - `npm run clean` - Clean build artifacts
+- `npm run validate:all` - Validate TypeScript and compile all contracts
 
 ### Environment Variables
 
 Copy `.env.example` to `.env` and configure:
 
+**Required:**
 - `WALLET_SEED` - Your 64-character wallet seed (auto-generated)
-- `MIDNIGHT_NETWORK` - Network to use (testnet)
-- `PROOF_SERVER_URL` - Proof server URL
-- `CONTRACT_NAME` - Contract name
+- `MIDNIGHT_NETWORK` - Network to use (testnet, default: testnet)
+- `PROOF_SERVER_URL` - Proof server URL (default: http://127.0.0.1:6300)
+
+**Optional:**
+- `CONTRACT_NAME` - Lending pool contract name (default: lending-pool)
+- `TOKEN_CONTRACT_NAME` - AToken contract name (default: atoken)
+- `TOKEN_NAME` - Token name for deployment (default: aToken)
+- `TOKEN_SYMBOL` - Token symbol for deployment (default: aTKN)
+- `TOKEN_DECIMALS` - Token decimals (default: 18)
 
 ### Getting Testnet Tokens
 

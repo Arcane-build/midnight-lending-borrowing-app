@@ -1,0 +1,241 @@
+pragma language_version >= 0.16 && <= 0.18;
+
+import CompactStandardLibrary;
+
+// Import OpenZeppelin Compact contracts with prefixes
+import "../compact-contracts/node_modules/@openzeppelin/compact-contracts/src/access/Ownable"
+  prefix Ownable_;
+import "../compact-contracts/node_modules/@openzeppelin/compact-contracts/src/security/Pausable"
+  prefix Pausable_;
+import "../compact-contracts/node_modules/@openzeppelin/compact-contracts/src/token/FungibleToken"
+  prefix FungibleToken_;
+
+/**
+ * @title AToken
+ * @notice Interest-bearing deposit token for the lending pool
+ * @dev Implements a fungible token that accrues interest through liquidity index
+ *      Only the lending pool (owner) can mint/burn tokens
+ */
+constructor(
+  _name: Opaque<"string">,
+  _symbol: Opaque<"string">,
+  _decimals: Uint<8>,
+  _owner: Either<ZswapCoinPublicKey, ContractAddress>,
+  _lendingPool: Either<ZswapCoinPublicKey, ContractAddress>
+) {
+  // Initialize FungibleToken with name, symbol, and decimals
+  FungibleToken_initialize(_name, _symbol, _decimals);
+  
+  // Initialize Ownable with the owner (typically the lending pool admin)
+  Ownable_initialize(_owner);
+  
+  // Store the lending pool address (only lending pool can mint/burn)
+  // Use disclose() to explicitly make the constructor parameter public
+  lendingPool = disclose(_lendingPool);
+}
+
+// ============ Ledger State ============
+
+// Lending pool address - only this address can mint/burn tokens
+export ledger lendingPool: Either<ZswapCoinPublicKey, ContractAddress>;
+
+// ============ IFungibleTokenMetadata ============
+
+/**
+ * @notice Returns the name of the token
+ */
+export circuit name(): Opaque<"string"> {
+  return FungibleToken_name();
+}
+
+/**
+ * @notice Returns the symbol of the token
+ */
+export circuit symbol(): Opaque<"string"> {
+  return FungibleToken_symbol();
+}
+
+/**
+ * @notice Returns the decimals of the token
+ */
+export circuit decimals(): Uint<8> {
+  return FungibleToken_decimals();
+}
+
+// ============ IFungibleToken ============
+
+/**
+ * @notice Returns the total supply of tokens
+ */
+export circuit totalSupply(): Uint<128> {
+  return FungibleToken_totalSupply();
+}
+
+/**
+ * @notice Returns the balance of an account
+ * @param account The account to query
+ */
+export circuit balanceOf(
+  account: Either<ZswapCoinPublicKey, ContractAddress>
+): Uint<128> {
+  return FungibleToken_balanceOf(account);
+}
+
+/**
+ * @notice Returns the amount of tokens that spender is allowed to spend on behalf of owner
+ * @param owner The owner of the tokens
+ * @param spender The spender address
+ */
+export circuit allowance(
+  owner: Either<ZswapCoinPublicKey, ContractAddress>,
+  spender: Either<ZswapCoinPublicKey, ContractAddress>
+): Uint<128> {
+  return FungibleToken_allowance(owner, spender);
+}
+
+/**
+ * @notice Transfers tokens to a recipient
+ * @param to The recipient address
+ * @param value The amount to transfer
+ * @return Boolean indicating success
+ */
+export circuit transfer(
+  to: Either<ZswapCoinPublicKey, ContractAddress>,
+  value: Uint<128>
+): Boolean {
+  Pausable_assertNotPaused();
+  return FungibleToken_transfer(to, value);
+}
+
+/**
+ * @notice Transfers tokens from one address to another
+ * @param from The sender address
+ * @param to The recipient address
+ * @param value The amount to transfer
+ * @return Boolean indicating success
+ */
+export circuit transferFrom(
+  from: Either<ZswapCoinPublicKey, ContractAddress>,
+  to: Either<ZswapCoinPublicKey, ContractAddress>,
+  value: Uint<128>
+): Boolean {
+  Pausable_assertNotPaused();
+  return FungibleToken_transferFrom(from, to, value);
+}
+
+/**
+ * @notice Approves a spender to spend tokens on behalf of the caller
+ * @param spender The spender address
+ * @param value The amount to approve
+ * @return Boolean indicating success
+ */
+export circuit approve(
+  spender: Either<ZswapCoinPublicKey, ContractAddress>,
+  value: Uint<128>
+): Boolean {
+  Pausable_assertNotPaused();
+  return FungibleToken_approve(spender, value);
+}
+
+// ============ IMintable (Lending Pool Only) ============
+
+/**
+ * @notice Mints tokens to an account (only callable by lending pool)
+ * @param account The account to mint tokens to
+ * @param value The amount to mint
+ */
+export circuit mint(
+  account: Either<ZswapCoinPublicKey, ContractAddress>,
+  value: Uint<128>
+): [] {
+  Pausable_assertNotPaused();
+  assertOnlyLendingPool();
+  FungibleToken__mint(account, value);
+}
+
+/**
+ * @notice Burns tokens from an account (only callable by lending pool)
+ * @param account The account to burn tokens from
+ * @param value The amount to burn
+ */
+export circuit burn(
+  account: Either<ZswapCoinPublicKey, ContractAddress>,
+  value: Uint<128>
+): [] {
+  Pausable_assertNotPaused();
+  assertOnlyLendingPool();
+  FungibleToken__burn(account, value);
+}
+
+// ============ IPausable ============
+
+/**
+ * @notice Returns whether the contract is paused
+ */
+export circuit isPaused(): Boolean {
+  return Pausable_isPaused();
+}
+
+/**
+ * @notice Pauses the contract (only callable by owner)
+ */
+export circuit pause(): [] {
+  Ownable_assertOnlyOwner();
+  Pausable__pause();
+}
+
+/**
+ * @notice Unpauses the contract (only callable by owner)
+ */
+export circuit unpause(): [] {
+  Ownable_assertOnlyOwner();
+  Pausable__unpause();
+}
+
+// ============ IOwnable ============
+
+/**
+ * @notice Returns the owner of the contract
+ */
+export circuit owner(): Either<ZswapCoinPublicKey, ContractAddress> {
+  return Ownable_owner();
+}
+
+/**
+ * @notice Transfers ownership to a new owner
+ * @param newOwner The new owner address
+ */
+export circuit transferOwnership(
+  newOwner: Either<ZswapCoinPublicKey, ContractAddress>
+): [] {
+  Ownable_transferOwnership(newOwner);
+}
+
+/**
+ * @notice Renounces ownership of the contract
+ */
+export circuit renounceOwnership(): [] {
+  Ownable_renounceOwnership();
+}
+
+// ============ Witness Declarations ============
+
+/**
+ * @notice Witness function to get the caller's address
+ * @dev In production, this would be provided by the calling contract
+ */
+witness callerAddress(): Either<ZswapCoinPublicKey, ContractAddress>;
+
+// ============ Internal Helper Circuits ============
+
+/**
+ * @notice Asserts that the caller is the lending pool
+ * @dev Uses witness function to get the caller's address
+ */
+circuit assertOnlyLendingPool(): [] {
+  const caller = callerAddress();
+  assert(
+    caller == lendingPool,
+    "AToken: caller is not the lending pool"
+  );
+}

@@ -2,6 +2,12 @@ pragma language_version >= 0.16 && <= 0.18;
 
 import CompactStandardLibrary;
 
+// Import OpenZeppelin Compact contracts with prefixes
+import "../compact-contracts/node_modules/@openzeppelin/compact-contracts/src/access/Ownable"
+  prefix Ownable_;
+import "../compact-contracts/node_modules/@openzeppelin/compact-contracts/src/security/Pausable"
+  prefix Pausable_;
+
 // NOTE:
 // - This contract is a **design skeleton** intended to mirror the patterns shown in `example-bboard`.
 // - Some container types (e.g., `Map`, `Vector`) and cross-contract calls will need to be aligned
@@ -69,11 +75,19 @@ struct InterestRates {
 
 // ============ Constructor ============
 
-constructor(adminAddr: Bytes<32>, rateModelAddr: Bytes<32>, oracleAddr: Bytes<32>) {
+constructor(
+  adminAddr: Bytes<32>,
+  rateModelAddr: Bytes<32>,
+  oracleAddr: Bytes<32>,
+  owner: Either<ZswapCoinPublicKey, ContractAddress>
+) {
   admin = disclose(adminAddr);
   interestRateModel = disclose(rateModelAddr);
   oracle = disclose(oracleAddr);
   sequence.increment(1);
+  
+  // Initialize Ownable with the owner (typically the admin or a multisig)
+  Ownable_initialize(owner);
 }
 
 // ============ Witness Declarations ============
@@ -107,6 +121,9 @@ export circuit deposit(
   asset: Bytes<32>,
   onBehalfOf: Bytes<32>
 ): [] {
+  // Check if contract is paused
+  Pausable_assertNotPaused();
+  
   const amount = depositAmount();
   const userAddr = getUserAddress();
   
@@ -172,6 +189,9 @@ export circuit withdraw(
   asset: Bytes<32>,
   to: Bytes<32>
 ): [] {
+  // Check if contract is paused
+  Pausable_assertNotPaused();
+  
   const amount = withdrawAmount();
   const userAddr = getUserAddress();
   
@@ -225,6 +245,9 @@ export circuit borrow(
   asset: Bytes<32>,
   rateMode: InterestRateMode
 ): [] {
+  // Check if contract is paused
+  Pausable_assertNotPaused();
+  
   const amount = borrowAmount();
   const userAddr = getUserAddress();
   
@@ -280,6 +303,9 @@ export circuit repay(
   asset: Bytes<32>,
   rateMode: InterestRateMode
 ): [] {
+  // Check if contract is paused
+  Pausable_assertNotPaused();
+  
   const amount = repayAmount();
   const userAddr = getUserAddress();
   
@@ -419,4 +445,57 @@ circuit updateUserAccountData(userAddr: Bytes<32>): [] {
   // This would aggregate all collateral and debt positions
   // Calculate health factor
   // Save updated account data
+}
+
+// ============ Pausable Functions ============
+
+/**
+ * @notice Returns whether the contract is paused
+ */
+export circuit isPaused(): Boolean {
+  return Pausable_isPaused();
+}
+
+/**
+ * @notice Pauses the contract (only callable by owner)
+ * @dev When paused, all deposit, withdraw, borrow, and repay operations are blocked
+ */
+export circuit pause(): [] {
+  Ownable_assertOnlyOwner();
+  Pausable__pause();
+}
+
+/**
+ * @notice Unpauses the contract (only callable by owner)
+ */
+export circuit unpause(): [] {
+  Ownable_assertOnlyOwner();
+  Pausable__unpause();
+}
+
+// ============ Ownable Functions ============
+
+/**
+ * @notice Returns the owner of the contract
+ */
+export circuit owner(): Either<ZswapCoinPublicKey, ContractAddress> {
+  return Ownable_owner();
+}
+
+/**
+ * @notice Transfers ownership to a new owner
+ * @param newOwner The new owner address
+ */
+export circuit transferOwnership(
+  newOwner: Either<ZswapCoinPublicKey, ContractAddress>
+): [] {
+  Ownable_transferOwnership(newOwner);
+}
+
+/**
+ * @notice Renounces ownership of the contract
+ * @dev This will permanently remove the ability to pause/unpause the contract
+ */
+export circuit renounceOwnership(): [] {
+  Ownable_renounceOwnership();
 }

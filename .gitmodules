@@ -1,0 +1,3 @@
+[submodule "compact-contracts"]
+	path = compact-contracts
+	url = https://github.com/OpenZeppelin/compact-contracts.git
