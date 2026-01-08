@@ -59,7 +59,7 @@ async function main() {
     EnvironmentManager.validateEnvironment();
 
     const networkConfig = EnvironmentManager.getNetworkConfig();
-    const contractName = process.env.CONTRACT_NAME || "hello-world";
+    const contractName = process.env.CONTRACT_NAME || "lending-pool";
 
     // Check if contract is compiled
     if (!EnvironmentManager.checkContractCompiled(contractName)) {
@@ -131,8 +131,28 @@ async function main() {
       "index.cjs"
     );
 
-    const HelloWorldModule = await import(contractModulePath);
-    const contractInstance = new HelloWorldModule.Contract({});
+    const LendingPoolModule = await import(contractModulePath);
+    
+    // Create placeholder addresses for constructor (32 bytes each)
+    // In production, these would be actual contract addresses
+    // For now, using placeholder values - these should be replaced with real addresses
+    const adminAddr = Buffer.alloc(32, 0x01);
+    const rateModelAddr = Buffer.alloc(32, 0x02);
+    const oracleAddr = Buffer.alloc(32, 0x03);
+    
+    // Create contract instance with minimal witness functions for deployment
+    // (Constructor doesn't use witnesses, only the initial state)
+    const contractInstance = new LendingPoolModule.Contract({
+      userSecretKey: async (context: any) => [context.privateState, Buffer.alloc(32)],
+      depositAmount: async (context: any) => [context.privateState, 0n],
+      withdrawAmount: async (context: any) => [context.privateState, 0n],
+      borrowAmount: async (context: any) => [context.privateState, 0n],
+      repayAmount: async (context: any) => [context.privateState, 0n],
+      currentTimestamp: async (context: any) => {
+        const timestamp = BigInt(Math.floor(Date.now() / 1000));
+        return [context.privateState, timestamp];
+      },
+    });
 
     // Create wallet provider for transactions
     const walletState = await Rx.firstValueFrom(wallet.state());
@@ -174,10 +194,27 @@ async function main() {
     // Deploy contract to blockchain
     console.log(chalk.blue("🚀 Deploying contract (30-60 seconds)..."));
     console.log();
+    console.log(chalk.yellow("⚠️  Note: Constructor requires admin, rate model, and oracle addresses."));
+    console.log(chalk.yellow("   Using placeholder addresses for deployment..."));
+    console.log(chalk.gray(`   Admin: ${Buffer.from(adminAddr).toString("hex")}`));
+    console.log(chalk.gray(`   Rate Model: ${Buffer.from(rateModelAddr).toString("hex")}`));
+    console.log(chalk.gray(`   Oracle: ${Buffer.from(oracleAddr).toString("hex")}`));
+    console.log();
+
+    // Deploy contract
+    // Note: Constructor arguments need to be provided via initialState
+    // The deployContract function will call the contract's initialState method
+    // We need to override the contract's initialState to pass constructor args
+    const contractWithInitialState = {
+      ...contractInstance,
+      initialState: (context: any) => {
+        return contractInstance.initialState(context, adminAddr, rateModelAddr, oracleAddr);
+      },
+    };
 
     const deployed = await deployContract(providers, {
-      contract: contractInstance,
-      privateStateId: "helloWorldState",
+      contract: contractWithInitialState as any,
+      privateStateId: "lendingPoolState",
       initialPrivateState: {},
     });
 
