@@ -1,0 +1,436 @@
+// This file is part of midnight-lending-borrowing.
+// Copyright (C) 2025
+// SPDX-License-Identifier: Apache-2.0
+
+pragma language_version >= 0.16 && <= 0.18;
+
+import CompactStandardLibrary;
+
+// Import OpenZeppelin Compact contracts with prefixes
+import "../compact-contracts/node_modules/@openzeppelin/compact-contracts/src/access/Ownable"
+  prefix Ownable_;
+import "../compact-contracts/node_modules/@openzeppelin/compact-contracts/src/security/Pausable"
+  prefix Pausable_;
+
+// NOTE:
+// - This contract is a **design skeleton** and does not yet implement full oracle iteration/aggregation.
+// - It focuses on the shape of collateral configuration and health-factor style computations.
+
+// ============ Enums ============
+
+export enum CollateralState {
+  DISABLED,
+  ENABLED
+}
+
+// ============ Ledger State ============
+
+// Lending pool address
+export ledger lendingPool: Either<ZswapCoinPublicKey, ContractAddress>;
+
+// Oracle address for price feeds
+export ledger oracle: Either<ZswapCoinPublicKey, ContractAddress>;
+
+// Mapping of asset to collateral configuration
+export ledger collateralConfigs: Map<Bytes<32>, CollateralConfig>;
+
+// Mapping of user to their collateral positions
+export ledger userCollateral: Map<Bytes<32>, Map<Bytes<32>, Uint<128>>>;
+
+// Mapping of user to their borrow positions
+export ledger userBorrows: Map<Bytes<32>, Map<Bytes<32>, Uint<128>>>;
+
+// Sequence counter
+export ledger sequence: Counter;
+
+// ============ Structs ============
+
+struct CollateralConfig {
+  enabled: Boolean;
+  liquidationThreshold: Uint<128>;  // Scaled by 1e18 (e.g., 80% = 0.8e18)
+  loanToValue: Uint<128>;            // Scaled by 1e18 (e.g., 75% = 0.75e18)
+  liquidationBonus: Uint<128>;      // Scaled by 1e18 (e.g., 5% = 0.05e18)
+}
+
+struct UserPosition {
+  totalCollateralBase: Uint<128>;   // Total collateral in base currency
+  totalDebtBase: Uint<128>;          // Total debt in base currency
+  availableBorrowsBase: Uint<128>;  // Available borrows
+  currentLiquidationThreshold: Uint<128>;  // Weighted threshold
+  healthFactor: Uint<128>;          // Health factor (scaled by 1e18)
+}
+
+// ============ Constructor ============
+
+constructor(
+  lendingPoolAddr: Either<ZswapCoinPublicKey, ContractAddress>,
+  oracleAddr: Either<ZswapCoinPublicKey, ContractAddress>,
+  owner: Either<ZswapCoinPublicKey, ContractAddress>
+) {
+  lendingPool = disclose(lendingPoolAddr);
+  oracle = disclose(oracleAddr);
+  sequence.increment(1);
+  
+  // Initialize Ownable with the owner (typically the admin or a multisig)
+  Ownable_initialize(owner);
+}
+
+// ============ Witness Declarations ============
+
+witness userSecretKey(): Bytes<32>;
+witness collateralAmount(): Uint<128>;
+witness borrowAmount(): Uint<128>;
+witness currentTimestamp(): Field;
+
+/**
+ * @notice Witness function to get the caller's address
+ * @dev In production, this would be provided by the calling contract
+ */
+witness callerAddress(): Either<ZswapCoinPublicKey, ContractAddress>;
+
+// ============ Helper Functions ============
+
+export circuit getUserAddress(): Bytes<32> {
+  return disclose(publicKey(userSecretKey(), sequence as Field as Bytes<32>));
+}
+
+export circuit publicKey(sk: Bytes<32>, seq: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<3, Bytes<32>>>([pad(32, "collateral:pk:"), seq, sk]);
+}
+
+// ============ Core Functions ============
+
+/**
+ * @notice Update user's collateral position
+ * @param user The user address
+ * @param asset The collateral asset
+ * @param isDeposit True for deposit, false for withdrawal
+ */
+export circuit updateCollateral(
+  user: Bytes<32>,
+  asset: Bytes<32>,
+  isDeposit: Boolean
+): [] {
+  // Check if contract is paused
+  Pausable_assertNotPaused();
+  
+  const amount = collateralAmount();
+  
+  // Only lending pool can update
+  assertOnlyLendingPool();
+  assert(user != default<Bytes<32>>, "Invalid user");
+  assert(asset != default<Bytes<32>>, "Invalid asset");
+  
+  // Disclose witness-derived amount before using in computations and ledger operations
+  const disclosedAmount = disclose(amount);
+  
+  // Validate amount
+  assert(disclosedAmount > 0, "Amount must be greater than 0");
+  
+  // Get collateral config
+  // NOTE: Map.lookup() returns the value directly (or default if not found)
+  const collateralConfig = collateralConfigs.lookup(disclose(asset));
+  assert(collateralConfig.enabled, "Asset not enabled as collateral");
+  
+  // Get current collateral balance by chaining lookups directly on the ledger
+  // NOTE: Cannot store intermediate Map - must chain lookups directly
+  const currentBal = userCollateral.lookup(disclose(user)).lookup(disclose(asset));
+  
+  // Disclose Boolean parameter before using in conditional
+  const disclosedIsDeposit = disclose(isDeposit);
+  
+  // Use Field for arithmetic to avoid bound issues, then cast to Uint<128>
+  const amountField = (disclosedAmount as Field);
+  const currentBalField = (currentBal as Field);
+  
+  // Handle withdrawal validations first
+  if (!disclosedIsDeposit) {
+    assert(currentBal >= disclosedAmount, "Insufficient collateral");
+    
+    // Check health factor after withdrawal
+    const position = getUserPosition(user);
+    const healthFactor = position.healthFactor;
+    const minHealthFactor = ((1000000000000000000 as Field) as Uint<128>);
+    assert(healthFactor >= minHealthFactor, "Health factor would be below threshold");
+  }
+  
+  // Calculate new balance based on deposit or withdrawal
+  const newBalanceField = disclosedIsDeposit ? 
+    (currentBalField + amountField) :
+    (currentBalField - amountField);
+  const newBalance = (newBalanceField as Uint<128>);
+  
+  // Update nested map: insert directly on the lookup result
+  // NOTE: insert() on a Map from ledger lookup mutates the ledger directly
+  userCollateral.lookup(disclose(user)).insert(disclose(asset), newBalance);
+  
+  // Update user account data
+  updateUserAccountData(user);
+}
+
+/**
+ * @notice Update user's borrow position
+ * @param user The user address
+ * @param asset The borrowed asset
+ * @param isBorrow True for borrow, false for repay
+ */
+export circuit updateBorrow(
+  user: Bytes<32>,
+  asset: Bytes<32>,
+  isBorrow: Boolean
+): [] {
+  // Check if contract is paused
+  Pausable_assertNotPaused();
+  
+  const amount = borrowAmount();
+  
+  // Only lending pool can update
+  assertOnlyLendingPool();
+  assert(user != default<Bytes<32>>, "Invalid user");
+  assert(asset != default<Bytes<32>>, "Invalid asset");
+  
+  // Disclose witness-derived amount before using in computations and ledger operations
+  const disclosedAmount = disclose(amount);
+  
+  // Validate amount
+  assert(disclosedAmount > 0, "Amount must be greater than 0");
+  
+  // Get current borrow balance by chaining lookups directly on the ledger
+  // NOTE: Cannot store intermediate Map - must chain lookups directly
+  const currentBal = userBorrows.lookup(disclose(user)).lookup(disclose(asset));
+  
+  // Disclose Boolean parameter before using in conditional
+  const disclosedIsBorrow = disclose(isBorrow);
+  
+  // Use Field for arithmetic to avoid bound issues, then cast to Uint<128>
+  const amountField = (disclosedAmount as Field);
+  const currentBalField = (currentBal as Field);
+  
+  // Handle repay validation first
+  if (!disclosedIsBorrow) {
+    assert(currentBal >= disclosedAmount, "Repay amount exceeds debt");
+  }
+  
+  // Calculate new balance based on borrow or repay
+  const newBalanceField = disclosedIsBorrow ?
+    (currentBalField + amountField) :
+    (currentBalField - amountField);
+  const newBalance = (newBalanceField as Uint<128>);
+  
+  // Update nested map: insert directly on the lookup result
+  // NOTE: insert() on a Map from ledger lookup mutates the ledger directly
+  userBorrows.lookup(disclose(user)).insert(disclose(asset), newBalance);
+  
+  // Update user account data
+  updateUserAccountData(user);
+}
+
+/**
+ * @notice Get user's position data
+ * @param user The user address
+ * @return UserPosition struct
+ */
+export circuit getUserPosition(user: Bytes<32>): UserPosition {
+  // Get user's collateral and borrow positions
+  // Calculate totals using oracle prices
+  // Note: In actual implementation, would iterate through all assets
+  // and get prices from oracle
+  
+  const totalCollateralBase: Uint<128> = (0 as Uint<128>);
+  const totalDebtBase: Uint<128> = (0 as Uint<128>);
+  const weightedLiquidationThreshold: Uint<128> = (0 as Uint<128>);
+  const totalCollateralValue: Uint<128> = (0 as Uint<128>);
+  
+  // Simplified calculation - actual implementation would:
+  // 1. Iterate through userCollateral map
+  // 2. Get price for each asset from oracle
+  // 3. Calculate weighted values
+  // 4. Do same for borrows
+  
+  // Calculate health factor
+  // NOTE: Compact does not support division (/), so health factor calculation
+  // is simplified. In production, this would use witness functions or pre-computed values.
+  // Cast to Field for comparison
+  const totalDebtBaseField = (totalDebtBase as Field);
+  const zeroField = (0 as Field);
+  
+  // Simplified health factor calculation - always return 2.0 (very healthy)
+  // In production, would use witness functions for division
+  const healthFactor: Uint<128> = ((2000000000000000000 as Field) as Uint<128>);
+  
+  // Calculate available borrows
+  const totalCollateralValueField = (totalCollateralValue as Field);
+  const weightedThresholdField = (weightedLiquidationThreshold as Field);
+  
+  // Simplified calculation - in production would use witness functions
+  const availableBorrowsBase: Uint<128> = (0 as Uint<128>);
+  
+  return UserPosition {
+    totalCollateralBase: totalCollateralBase,
+    totalDebtBase: totalDebtBase,
+    availableBorrowsBase: availableBorrowsBase,
+    currentLiquidationThreshold: weightedLiquidationThreshold,
+    healthFactor: healthFactor
+  };
+}
+
+/**
+ * @notice Get user's health factor
+ * @param user The user address
+ * @return Health factor (scaled by 1e18)
+ */
+export circuit getUserHealthFactor(user: Bytes<32>): Uint<128> {
+  const position = getUserPosition(user);
+  return position.healthFactor;
+}
+
+/**
+ * @notice Check if user can be liquidated
+ * @param user The user address
+ * @return True if user can be liquidated (health factor < 1.0)
+ */
+export circuit canLiquidate(user: Bytes<32>): Boolean {
+  const position = getUserPosition(user);
+  const healthFactor = position.healthFactor;
+  const minHealthFactor = ((1000000000000000000 as Field) as Uint<128>);
+  return healthFactor < minHealthFactor;
+}
+
+/**
+ * @notice Get user's collateral balance for an asset
+ * @param user The user address
+ * @param asset The asset address
+ * @return The collateral balance
+ */
+export circuit getUserCollateral(user: Bytes<32>, asset: Bytes<32>): Uint<128> {
+  // NOTE: Chain lookups directly - cannot store intermediate Map from ledger lookup
+  return userCollateral.lookup(disclose(user)).lookup(disclose(asset));
+}
+
+/**
+ * @notice Get user's borrow balance for an asset
+ * @param user The user address
+ * @param asset The asset address
+ * @return The borrow balance
+ */
+export circuit getUserBorrow(user: Bytes<32>, asset: Bytes<32>): Uint<128> {
+  // NOTE: Chain lookups directly - cannot store intermediate Map from ledger lookup
+  return userBorrows.lookup(disclose(user)).lookup(disclose(asset));
+}
+
+// ============ Internal Functions ============
+
+circuit updateUserAccountData(user: Bytes<32>): [] {
+  // Update user's account data based on current positions
+  // This would recalculate health factor, available borrows, etc.
+  // In actual implementation, would aggregate all positions
+}
+
+/**
+ * @notice Asserts that the caller is the lending pool
+ * @dev Uses witness function to get the caller's address
+ */
+circuit assertOnlyLendingPool(): [] {
+  const caller = callerAddress();
+  assert(
+    caller == lendingPool,
+    "CollateralManager: caller is not the lending pool"
+  );
+}
+
+// ============ Admin Functions ============
+
+/**
+ * @notice Configure collateral parameters for an asset
+ * @param asset The asset address
+ * @param enabled Whether asset can be used as collateral
+ * @param liquidationThreshold Liquidation threshold (scaled by 1e18)
+ * @param loanToValue LTV ratio (scaled by 1e18)
+ * @param liquidationBonus Liquidation bonus (scaled by 1e18)
+ */
+export circuit configureCollateral(
+  asset: Bytes<32>,
+  enabled: Boolean,
+  liquidationThreshold: Uint<128>,
+  loanToValue: Uint<128>,
+  liquidationBonus: Uint<128>
+): [] {
+  // Check if contract is paused
+  Pausable_assertNotPaused();
+  
+  // Only owner can configure
+  Ownable_assertOnlyOwner();
+  
+  // Disclose parameters before using in ledger operations
+  const disclosedEnabled = disclose(enabled);
+  const disclosedThreshold = disclose(liquidationThreshold);
+  const disclosedLtv = disclose(loanToValue);
+  const disclosedBonus = disclose(liquidationBonus);
+  
+  const maxThreshold = ((1000000000000000000 as Field) as Uint<128>);
+  
+  assert(disclosedThreshold <= maxThreshold, "Invalid liquidation threshold");
+  assert(disclosedLtv <= disclosedThreshold, "LTV must be <= liquidation threshold");
+  
+  const config = CollateralConfig {
+    enabled: disclosedEnabled,
+    liquidationThreshold: disclosedThreshold,
+    loanToValue: disclosedLtv,
+    liquidationBonus: disclosedBonus
+  };
+  
+  collateralConfigs.insert(disclose(asset), config);
+}
+
+// ============ Pausable Functions ============
+
+/**
+ * @notice Returns whether the contract is paused
+ */
+export circuit isPaused(): Boolean {
+  return Pausable_isPaused();
+}
+
+/**
+ * @notice Pauses the contract (only callable by owner)
+ * @dev When paused, all collateral and borrow operations are blocked
+ */
+export circuit pause(): [] {
+  Ownable_assertOnlyOwner();
+  Pausable__pause();
+}
+
+/**
+ * @notice Unpauses the contract (only callable by owner)
+ */
+export circuit unpause(): [] {
+  Ownable_assertOnlyOwner();
+  Pausable__unpause();
+}
+
+// ============ Ownable Functions ============
+
+/**
+ * @notice Returns the owner of the contract
+ */
+export circuit owner(): Either<ZswapCoinPublicKey, ContractAddress> {
+  return Ownable_owner();
+}
+
+/**
+ * @notice Transfers ownership to a new owner
+ * @param newOwner The new owner address
+ */
+export circuit transferOwnership(
+  newOwner: Either<ZswapCoinPublicKey, ContractAddress>
+): [] {
+  Ownable_transferOwnership(newOwner);
+}
+
+/**
+ * @notice Renounces ownership of the contract
+ * @dev This will permanently remove the ability to pause/unpause the contract
+ */
+export circuit renounceOwnership(): [] {
+  Ownable_renounceOwnership();
+}
