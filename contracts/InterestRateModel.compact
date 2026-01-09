@@ -1,0 +1,254 @@
+// This file is part of midnight-lending-borrowing.
+// Copyright (C) 2025
+// SPDX-License-Identifier: Apache-2.0
+
+pragma language_version >= 0.16 && <= 0.18;
+
+import CompactStandardLibrary;
+
+// Import OpenZeppelin Compact contracts with prefixes
+import "../compact-contracts/node_modules/@openzeppelin/compact-contracts/src/access/Ownable"
+  prefix Ownable_;
+import "../compact-contracts/node_modules/@openzeppelin/compact-contracts/src/security/Pausable"
+  prefix Pausable_;
+
+// NOTE:
+// - This is a **design skeleton** for a utilization-based rate model (Aave-style 2-slope curve).
+// - NOTE: Compact does not support division (/), so utilization rate calculation
+//   is simplified. In production, this would use witness functions or pre-computed values.
+
+// ============ Ledger State ============
+
+// Optimal utilization rate (where rates start increasing significantly)
+export ledger optimalUtilizationRate: Uint<128>;  // Scaled by 1e18 (e.g., 80% = 0.8e18)
+
+// Base variable borrow rate when utilization is below optimal
+export ledger baseVariableBorrowRate: Uint<128>;  // Scaled by 1e18
+
+// Slope of the interest rate curve when utilization is below optimal
+export ledger slope1: Uint<128>;  // Scaled by 1e18
+
+// Slope of the interest rate curve when utilization is above optimal
+export ledger slope2: Uint<128>;  // Scaled by 1e18
+
+// Maximum variable borrow rate
+export ledger maxVariableBorrowRate: Uint<128>;  // Scaled by 1e18
+
+// Sequence counter
+export ledger sequence: Counter;
+
+// ============ Structs ============
+
+struct InterestRates {
+  liquidityRate: Uint<128>;
+  variableBorrowRate: Uint<128>;
+}
+
+// ============ Constructor ============
+
+constructor(
+  optimalUtilizationRateValue: Uint<128>,
+  baseVariableBorrowRateValue: Uint<128>,
+  slope1Value: Uint<128>,
+  slope2Value: Uint<128>,
+  maxVariableBorrowRateValue: Uint<128>,
+  owner: Either<ZswapCoinPublicKey, ContractAddress>
+) {
+  // Disclose constructor parameters before storing in ledger
+  const optimal = disclose(optimalUtilizationRateValue);
+  const base = disclose(baseVariableBorrowRateValue);
+  const max = disclose(maxVariableBorrowRateValue);
+  const s1 = disclose(slope1Value);
+  const s2 = disclose(slope2Value);
+  
+  const maxUtilization = ((1000000000000000000 as Field) as Uint<128>);
+  
+  assert(optimal <= maxUtilization, "Invalid optimal utilization");
+  assert(base <= max, "Invalid base rate");
+  assert(s1 <= s2, "Invalid slopes");
+  
+  optimalUtilizationRate = optimal;
+  baseVariableBorrowRate = base;
+  slope1 = s1;
+  slope2 = s2;
+  maxVariableBorrowRate = max;
+  sequence.increment(1);
+  
+  // Initialize Ownable with the owner
+  Ownable_initialize(owner);
+}
+
+// ============ Witness Declarations ============
+
+witness userSecretKey(): Bytes<32>;
+
+// ============ Helper Functions ============
+
+export circuit getUserAddress(): Bytes<32> {
+  return disclose(publicKey(userSecretKey(), sequence as Field as Bytes<32>));
+}
+
+export circuit publicKey(sk: Bytes<32>, seq: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<3, Bytes<32>>>([pad(32, "interest:pk:"), seq, sk]);
+}
+
+// ============ Core Functions ============
+
+/**
+ * @notice Calculate interest rates based on utilization
+ * @param totalLiquidity Total liquidity in the pool
+ * @param totalVariableDebt Total variable debt
+ * @return InterestRates struct with liquidityRate and variableBorrowRate
+ */
+export circuit calculateInterestRates(
+  totalLiquidity: Uint<128>,
+  totalVariableDebt: Uint<128>
+): InterestRates {
+  // Check if contract is paused
+  Pausable_assertNotPaused();
+  
+  // Disclose parameters before using in comparisons and operations
+  const liquidity = disclose(totalLiquidity);
+  const debt = disclose(totalVariableDebt);
+  
+  const zeroField = (0 as Field);
+  const liquidityField = (liquidity as Field);
+  
+  if (liquidityField == zeroField) {
+    return InterestRates {
+      liquidityRate: (0 as Uint<128>),
+      variableBorrowRate: baseVariableBorrowRate
+    };
+  }
+  
+  // NOTE: Compact does not support division (/), so utilization rate calculation
+  // is simplified. In production, this would use witness functions or pre-computed values.
+  // For now, use fixed rates based on simplified logic
+  
+  // Get model parameters
+  const optimal = optimalUtilizationRate;
+  const base = baseVariableBorrowRate;
+  const s1 = slope1;
+  const s2 = slope2;
+  const max = maxVariableBorrowRate;
+  
+  // Simplified calculation - in production would use witness functions for division
+  // Fixed rates for now (would be dynamic in production based on utilization)
+  // Cast large literals through Field to avoid bound issues
+  const variableBorrowRate = ((50000000000000000 as Field) as Uint<128>); // 5% annual rate
+  const liquidityRate = ((25000000000000000 as Field) as Uint<128>); // 2.5% annual rate
+  
+  // Cap at maximum
+  const finalBorrowRate = variableBorrowRate > max ? max : variableBorrowRate;
+  
+  return InterestRates {
+    liquidityRate: liquidityRate,
+    variableBorrowRate: finalBorrowRate
+  };
+}
+
+/**
+ * @notice Get current interest rates for given pool state
+ * @param totalLiquidity Total liquidity
+ * @param totalVariableDebt Total variable debt
+ * @return InterestRates struct
+ */
+export circuit getInterestRates(
+  totalLiquidity: Uint<128>,
+  totalVariableDebt: Uint<128>
+): InterestRates {
+  return calculateInterestRates(totalLiquidity, totalVariableDebt);
+}
+
+// ============ View Functions ============
+
+/**
+ * @notice Get optimal utilization rate
+ * @return The optimal utilization rate (scaled by 1e18)
+ */
+export circuit getOptimalUtilizationRate(): Uint<128> {
+  return optimalUtilizationRate;
+}
+
+/**
+ * @notice Get base variable borrow rate
+ * @return The base variable borrow rate (scaled by 1e18)
+ */
+export circuit getBaseVariableBorrowRate(): Uint<128> {
+  return baseVariableBorrowRate;
+}
+
+/**
+ * @notice Get maximum variable borrow rate
+ * @return The maximum variable borrow rate (scaled by 1e18)
+ */
+export circuit getMaxVariableBorrowRate(): Uint<128> {
+  return maxVariableBorrowRate;
+}
+
+/**
+ * @notice Get slope1
+ * @return Slope1 (scaled by 1e18)
+ */
+export circuit getSlope1(): Uint<128> {
+  return slope1;
+}
+
+/**
+ * @notice Get slope2
+ * @return Slope2 (scaled by 1e18)
+ */
+export circuit getSlope2(): Uint<128> {
+  return slope2;
+}
+
+// ============ Pausable Functions ============
+
+/**
+ * @notice Returns whether the contract is paused
+ */
+export circuit isPaused(): Boolean {
+  return Pausable_isPaused();
+}
+
+/**
+ * @notice Pauses the contract (only callable by owner)
+ */
+export circuit pause(): [] {
+  Ownable_assertOnlyOwner();
+  Pausable__pause();
+}
+
+/**
+ * @notice Unpauses the contract (only callable by owner)
+ */
+export circuit unpause(): [] {
+  Ownable_assertOnlyOwner();
+  Pausable__unpause();
+}
+
+// ============ Ownable Functions ============
+
+/**
+ * @notice Returns the owner of the contract
+ */
+export circuit owner(): Either<ZswapCoinPublicKey, ContractAddress> {
+  return Ownable_owner();
+}
+
+/**
+ * @notice Transfers ownership to a new owner
+ * @param newOwner The new owner address
+ */
+export circuit transferOwnership(
+  newOwner: Either<ZswapCoinPublicKey, ContractAddress>
+): [] {
+  Ownable_transferOwnership(newOwner);
+}
+
+/**
+ * @notice Renounces ownership of the contract
+ */
+export circuit renounceOwnership(): [] {
+  Ownable_renounceOwnership();
+}

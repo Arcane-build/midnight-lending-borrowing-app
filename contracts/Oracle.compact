@@ -1,0 +1,299 @@
+// This file is part of midnight-lending-borrowing.
+// Copyright (C) 2025
+// SPDX-License-Identifier: Apache-2.0
+
+pragma language_version >= 0.16 && <= 0.18;
+
+import CompactStandardLibrary;
+
+// Import OpenZeppelin Compact contracts with prefixes
+import "../compact-contracts/node_modules/@openzeppelin/compact-contracts/src/access/Ownable"
+  prefix Ownable_;
+import "../compact-contracts/node_modules/@openzeppelin/compact-contracts/src/security/Pausable"
+  prefix Pausable_;
+
+// NOTE:
+// - This is a **design skeleton** for a price registry/oracle facade.
+// - Oracle mechanics (feeds, aggregation, staleness checks) must be adapted to what is available on your target Midnight network.
+// - NOTE: Compact does not support division (/), so price calculations are simplified.
+
+// ============ Ledger State ============
+
+// Mapping of asset to price feed address
+export ledger priceFeeds: Map<Bytes<32>, Bytes<32>>;
+
+// Mapping of asset to latest price (public prices)
+export ledger latestPrices: Map<Bytes<32>, Uint<128>>;
+
+// Mapping of asset to price decimals
+export ledger priceDecimals: Map<Bytes<32>, Uint<8>>;
+
+// Base currency (e.g., USD)
+export ledger baseCurrency: Bytes<32>;
+
+// Price update threshold (minimum time between updates)
+export ledger priceUpdateThreshold: Uint<128>;
+
+// Mapping of asset to last update timestamp
+export ledger lastUpdateTimestamp: Map<Bytes<32>, Uint<128>>;
+
+// Sequence counter
+export ledger sequence: Counter;
+
+// ============ Structs ============
+
+struct PriceData {
+  price: Uint<128>;
+  timestamp: Uint<128>;
+  decimals: Uint<8>;
+}
+
+// ============ Constructor ============
+
+constructor(
+  baseCurrencyAddr: Bytes<32>,
+  owner: Either<ZswapCoinPublicKey, ContractAddress>
+) {
+  baseCurrency = disclose(baseCurrencyAddr);
+  priceUpdateThreshold = ((3600 as Field) as Uint<128>);  // 1 hour default
+  sequence.increment(1);
+  
+  // Initialize Ownable with the owner
+  Ownable_initialize(owner);
+}
+
+// ============ Witness Declarations ============
+
+witness userSecretKey(): Bytes<32>;
+witness assetAmount(): Uint<128>;
+witness currentTimestamp(): Field;
+
+/**
+ * @notice Witness function to get the caller's address
+ */
+witness callerAddress(): Either<ZswapCoinPublicKey, ContractAddress>;
+
+// ============ Helper Functions ============
+
+export circuit getUserAddress(): Bytes<32> {
+  return disclose(publicKey(userSecretKey(), sequence as Field as Bytes<32>));
+}
+
+export circuit publicKey(sk: Bytes<32>, seq: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<3, Bytes<32>>>([pad(32, "oracle:pk:"), seq, sk]);
+}
+
+// ============ Core Functions ============
+
+/**
+ * @notice Get the price of an asset in base currency
+ * @param asset The asset address
+ * @return PriceData struct with price, timestamp, and decimals
+ */
+export circuit getPrice(asset: Bytes<32>): PriceData {
+  // Check if contract is paused
+  Pausable_assertNotPaused();
+  
+  // NOTE: Map.lookup() returns the value directly (or default if not found)
+  const priceValue = latestPrices.lookup(disclose(asset));
+  assert(priceValue > (0 as Uint<128>), "Price not available");
+  
+  const decimalsValue = priceDecimals.lookup(disclose(asset));
+  const defaultDecimals = ((18 as Field) as Uint<8>);
+  const finalDecimals = decimalsValue > (0 as Uint<8>) ? decimalsValue : defaultDecimals;
+  
+  const timestampValue = lastUpdateTimestamp.lookup(disclose(asset));
+  
+  return PriceData {
+    price: priceValue,
+    timestamp: timestampValue,
+    decimals: finalDecimals
+  };
+}
+
+/**
+ * @notice Get the value of an amount of asset in base currency
+ * @param asset The asset address
+ * @param amount The amount of asset
+ * @return value The value in base currency
+ */
+export circuit getAssetValue(asset: Bytes<32>, amount: Uint<128>): Uint<128> {
+  const priceData = getPrice(asset);
+  
+  // NOTE: Compact does not support division (/), so value calculation
+  // is simplified. In production, this would use witness functions or pre-computed values.
+  // Simplified: multiply amount by price (assuming same decimals)
+  const amountField = (amount as Field);
+  const priceField = (priceData.price as Field);
+  const valueField = amountField * priceField;
+  
+  // In production, would divide by 10^decimals using witness function
+  return (valueField as Uint<128>);
+}
+
+/**
+ * @notice Update price for an asset
+ * @param asset The asset address
+ * @param price The new price
+ * @param decimals The price decimals
+ */
+export circuit updatePrice(
+  asset: Bytes<32>,
+  price: Uint<128>,
+  decimals: Uint<8>
+): [] {
+  // Check if contract is paused
+  Pausable_assertNotPaused();
+  
+  const caller = callerAddress();
+  
+  // In production, this would be called by a trusted price feed
+  // For now, allow owner to update prices
+  // Note: Price feed comparison would require proper address conversion
+  Ownable_assertOnlyOwner();
+  
+  assert(asset != default<Bytes<32>>, "Invalid asset");
+  
+  // Disclose parameters before storing in ledger
+  const disclosedPrice = disclose(price);
+  const disclosedDecimals = disclose(decimals);
+  
+  assert(disclosedPrice > (0 as Uint<128>), "Invalid price");
+  
+  // Disclose timestamp witness before assigning to ledger
+  const timestamp = disclose(currentTimestamp());
+  const timestampUint = ((timestamp as Field) as Uint<128>);
+  
+  // Update price
+  latestPrices.insert(disclose(asset), disclosedPrice);
+  priceDecimals.insert(disclose(asset), disclosedDecimals);
+  lastUpdateTimestamp.insert(disclose(asset), timestampUint);
+}
+
+/**
+ * @notice Set price feed address for an asset
+ * @param asset The asset address
+ * @param priceFeedAddr The price feed contract address (as Bytes<32>)
+ */
+export circuit setPriceFeed(
+  asset: Bytes<32>,
+  priceFeedAddr: Bytes<32>
+): [] {
+  // Check if contract is paused
+  Pausable_assertNotPaused();
+  
+  // Only owner can set price feeds
+  Ownable_assertOnlyOwner();
+  
+  assert(asset != default<Bytes<32>>, "Invalid asset");
+  
+  // Disclose parameter before storing in ledger
+  const disclosedPriceFeed = disclose(priceFeedAddr);
+  
+  assert(disclosedPriceFeed != default<Bytes<32>>, "Invalid price feed");
+  
+  priceFeeds.insert(disclose(asset), disclosedPriceFeed);
+}
+
+/**
+ * @notice Batch update prices
+ * @param assets Array of asset addresses
+ * @param prices Array of prices
+ * @param decimalsArray Array of price decimals
+ */
+export circuit batchUpdatePrices(
+  assets: Vector<10, Bytes<32>>,
+  prices: Vector<10, Uint<128>>,
+  decimalsArray: Vector<10, Uint<8>>
+): [] {
+  // Check if contract is paused
+  Pausable_assertNotPaused();
+  
+  // Only owner can batch update prices
+  Ownable_assertOnlyOwner();
+  
+  // Note: Compact may not support traditional for loops
+  // This is a simplified version - actual implementation may differ
+  // Would need to iterate through vectors and call updatePrice for each
+  // For now, this is a placeholder
+}
+
+// ============ View Functions ============
+
+/**
+ * @notice Check if price is available for an asset
+ * @param asset The asset address
+ * @return True if price is available
+ */
+export circuit isPriceAvailable(asset: Bytes<32>): Boolean {
+  const price = latestPrices.lookup(disclose(asset));
+  return price > (0 as Uint<128>);
+}
+
+/**
+ * @notice Get price feed address for an asset
+ * @param asset The asset address
+ * @return The price feed address (or default if not set)
+ */
+export circuit getPriceFeed(asset: Bytes<32>): Bytes<32> {
+  return priceFeeds.lookup(disclose(asset));
+}
+
+/**
+ * @notice Get base currency address
+ * @return The base currency address
+ */
+export circuit getBaseCurrency(): Bytes<32> {
+  return baseCurrency;
+}
+
+// ============ Pausable Functions ============
+
+/**
+ * @notice Returns whether the contract is paused
+ */
+export circuit isPaused(): Boolean {
+  return Pausable_isPaused();
+}
+
+/**
+ * @notice Pauses the contract (only callable by owner)
+ */
+export circuit pause(): [] {
+  Ownable_assertOnlyOwner();
+  Pausable__pause();
+}
+
+/**
+ * @notice Unpauses the contract (only callable by owner)
+ */
+export circuit unpause(): [] {
+  Ownable_assertOnlyOwner();
+  Pausable__unpause();
+}
+
+// ============ Ownable Functions ============
+
+/**
+ * @notice Returns the owner of the contract
+ */
+export circuit owner(): Either<ZswapCoinPublicKey, ContractAddress> {
+  return Ownable_owner();
+}
+
+/**
+ * @notice Transfers ownership to a new owner
+ * @param newOwner The new owner address
+ */
+export circuit transferOwnership(
+  newOwner: Either<ZswapCoinPublicKey, ContractAddress>
+): [] {
+  Ownable_transferOwnership(newOwner);
+}
+
+/**
+ * @notice Renounces ownership of the contract
+ */
+export circuit renounceOwnership(): [] {
+  Ownable_renounceOwnership();
+}
