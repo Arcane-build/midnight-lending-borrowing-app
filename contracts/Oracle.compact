@@ -6,7 +6,7 @@ pragma language_version >= 0.16 && <= 0.18;
 
 import CompactStandardLibrary;
 
-// Import OpenZeppelin Compact contracts with prefixes
+// Import OpenZeppelin Compact contracts with prefixes. 
 import "../compact-contracts/node_modules/@openzeppelin/compact-contracts/src/access/Ownable"
   prefix Ownable_;
 import "../compact-contracts/node_modules/@openzeppelin/compact-contracts/src/security/Pausable"
