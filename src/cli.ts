@@ -3,13 +3,9 @@ import * as readline from "readline/promises";
 import { WalletBuilder } from "@midnight-ntwrk/wallet";
 import { findDeployedContract } from "@midnight-ntwrk/midnight-js-contracts";
 import {
-  NetworkId,
-  setNetworkId,
-  getZswapNetworkId,
-  getLedgerNetworkId,
+  getNetworkId,
 } from "@midnight-ntwrk/midnight-js-network-id";
-import { createBalancedTx } from "@midnight-ntwrk/midnight-js-types";
-import { Transaction } from "@midnight-ntwrk/ledger";
+import { Transaction } from "@midnight-ntwrk/ledger-v6";
 import { Transaction as ZswapTransaction } from "@midnight-ntwrk/zswap";
 import { WebSocket } from "ws";
 import * as path from "path";
@@ -21,9 +17,6 @@ import { EnvironmentManager } from "./utils/environment.js";
 // Fix WebSocket for Node.js environment
 // @ts-ignore
 globalThis.WebSocket = WebSocket;
-
-// Configure for Midnight Testnet
-setNetworkId(NetworkId.TestNet);
 
 async function main() {
   const rl = readline.createInterface({
@@ -50,6 +43,7 @@ async function main() {
     const contractName =
       deployment.contractName || process.env.CONTRACT_NAME || "lending-pool";
     const walletSeed = process.env.WALLET_SEED!;
+    const networkId = process.env.MIDNIGHT_NETWORK || "preview";
 
     console.log("Connecting to Midnight network...");
 
@@ -60,7 +54,7 @@ async function main() {
       networkConfig.proofServer,
       networkConfig.node,
       walletSeed,
-      getZswapNetworkId(),
+      networkId as any, // NetworkId type - wallet package may still expect enum
       "info"
     );
 
@@ -78,7 +72,7 @@ async function main() {
       "managed",
       contractName,
       "contract",
-      "index.cjs"
+      "index.js"
     );
     const LendingPoolModule = await import(contractModulePath);
 
@@ -86,28 +80,32 @@ async function main() {
     const walletState = await Rx.firstValueFrom(wallet.state());
 
     const walletProvider = {
-      coinPublicKey: walletState.coinPublicKey,
-      encryptionPublicKey: walletState.encryptionPublicKey,
-      balanceTx(tx: any, newCoins: any) {
-        return wallet
+      getCoinPublicKey: () => walletState.coinPublicKey,
+      getEncryptionPublicKey: () => walletState.encryptionPublicKey,
+      async balanceTx(tx: any, newCoins?: any, ttl?: Date): Promise<any> {
+        // v3.0.0: balanceTx should return BalancedProvingRecipe
+        // Contract calls handle the recipe internally
+        const networkIdStr = networkId as any; // NetworkId type for transaction serialization
+        const zswapTx = await wallet
           .balanceTransaction(
             ZswapTransaction.deserialize(
-              tx.serialize(getLedgerNetworkId()),
-              getZswapNetworkId()
+              tx.serialize(networkIdStr),
+              networkIdStr
             ),
             newCoins
           )
-          .then((tx) => wallet.proveTransaction(tx))
-          .then((zswapTx) =>
-            Transaction.deserialize(
-              zswapTx.serialize(getZswapNetworkId()),
-              getLedgerNetworkId()
-            )
-          )
-          .then(createBalancedTx);
+          .then((tx) => wallet.proveTransaction(tx));
+        
+        // v3.0.0: Transaction.deserialize signature changed - return zswapTx directly
+        // The contract call functions will handle the conversion
+        // Return as NothingToProve since transaction is already proven
+        return {
+          type: 'NothingToProve',
+          transaction: zswapTx as any // Transaction type - conversion handled by SDK
+        };
       },
-      submitTx(tx: any) {
-        return wallet.submitTransaction(tx);
+      async submitTx(tx: any): Promise<string> {
+        return await wallet.submitTransaction(tx);
       },
     };
 
@@ -196,10 +194,9 @@ async function main() {
             const onBehalfOfBytes = Buffer.from(depositOnBehalfOf, "hex");
             
             // Witness functions (depositAmount, userSecretKey, currentTimestamp) will be called automatically
-            const tx = await deployed.callTx.deposit(assetBytes, onBehalfOfBytes);
+            const result = await deployed.callTx.deposit(assetBytes, onBehalfOfBytes);
             console.log("✅ Deposit successful!");
-            console.log(`Transaction ID: ${tx.public.txId}`);
-            console.log(`Block height: ${tx.public.blockHeight}\n`);
+            console.log(`Transaction ID: ${result.txId}\n`);
           } catch (error) {
             console.error("❌ Failed to deposit:", error);
           }
@@ -217,10 +214,9 @@ async function main() {
             const toBytes = Buffer.from(withdrawTo, "hex");
             
             // Witness functions (withdrawAmount, userSecretKey, currentTimestamp) will be called automatically
-            const tx = await deployed.callTx.withdraw(assetBytes, toBytes);
+            const result = await deployed.callTx.withdraw(assetBytes, toBytes);
             console.log("✅ Withdrawal successful!");
-            console.log(`Transaction ID: ${tx.public.txId}`);
-            console.log(`Block height: ${tx.public.blockHeight}\n`);
+            console.log(`Transaction ID: ${result.txId}\n`);
           } catch (error) {
             console.error("❌ Failed to withdraw:", error);
           }
@@ -236,10 +232,9 @@ async function main() {
             const assetBytes = Buffer.from(borrowAsset, "hex");
             // InterestRateMode.VARIABLE = 2
             // Witness functions (borrowAmount, userSecretKey, currentTimestamp) will be called automatically
-            const tx = await deployed.callTx.borrow(assetBytes, 2);
+            const result = await deployed.callTx.borrow(assetBytes, 2);
             console.log("✅ Borrow successful!");
-            console.log(`Transaction ID: ${tx.public.txId}`);
-            console.log(`Block height: ${tx.public.blockHeight}\n`);
+            console.log(`Transaction ID: ${result.txId}\n`);
           } catch (error) {
             console.error("❌ Failed to borrow:", error);
           }
@@ -255,10 +250,9 @@ async function main() {
             const assetBytes = Buffer.from(repayAsset, "hex");
             // InterestRateMode.VARIABLE = 2
             // Witness functions (repayAmount, userSecretKey, currentTimestamp) will be called automatically
-            const tx = await deployed.callTx.repay(assetBytes, 2);
+            const result = await deployed.callTx.repay(assetBytes, 2);
             console.log("✅ Repayment successful!");
-            console.log(`Transaction ID: ${tx.public.txId}`);
-            console.log(`Block height: ${tx.public.blockHeight}\n`);
+            console.log(`Transaction ID: ${result.txId}\n`);
           } catch (error) {
             console.error("❌ Failed to repay:", error);
           }

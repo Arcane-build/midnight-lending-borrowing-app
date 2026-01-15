@@ -6,13 +6,9 @@ import { indexerPublicDataProvider } from "@midnight-ntwrk/midnight-js-indexer-p
 import { NodeZkConfigProvider } from "@midnight-ntwrk/midnight-js-node-zk-config-provider";
 import { levelPrivateStateProvider } from "@midnight-ntwrk/midnight-js-level-private-state-provider";
 import {
-  NetworkId,
-  setNetworkId,
-  getZswapNetworkId,
-  getLedgerNetworkId,
+  getNetworkId,
 } from "@midnight-ntwrk/midnight-js-network-id";
-import { createBalancedTx } from "@midnight-ntwrk/midnight-js-types";
-import { nativeToken, Transaction } from "@midnight-ntwrk/ledger";
+import { nativeToken, Transaction } from "@midnight-ntwrk/ledger-v6";
 import { Transaction as ZswapTransaction } from "@midnight-ntwrk/zswap";
 import { WebSocket } from "ws";
 import * as fs from "fs";
@@ -27,9 +23,6 @@ import { EnvironmentManager } from "./utils/environment.js";
 // @ts-ignore
 globalThis.WebSocket = WebSocket;
 
-// Configure for Midnight Testnet
-setNetworkId(NetworkId.TestNet);
-
 const waitForFunds = (wallet: Wallet) =>
   Rx.firstValueFrom(
     wallet.state().pipe(
@@ -41,7 +34,7 @@ const waitForFunds = (wallet: Wallet) =>
         }
       }),
       Rx.filter((state) => state.syncProgress?.synced === true),
-      Rx.map((s) => s.balances[nativeToken()] ?? 0n),
+      Rx.map((s) => s.balances[nativeToken().raw] ?? 0n),
       Rx.filter((balance) => balance > 0n),
       Rx.tap((balance) => console.log(`Wallet funded with balance: ${balance}`))
     )
@@ -60,6 +53,7 @@ async function main() {
 
     const networkConfig = EnvironmentManager.getNetworkConfig();
     const contractName = process.env.TOKEN_CONTRACT_NAME || "atoken";
+    const networkId = process.env.MIDNIGHT_NETWORK || "preview";
 
     // Check if contract is compiled
     if (!EnvironmentManager.checkContractCompiled(contractName)) {
@@ -77,7 +71,7 @@ async function main() {
       networkConfig.proofServer,
       networkConfig.node,
       walletSeed,
-      getZswapNetworkId(),
+      networkId as any, // NetworkId type - wallet package may still expect enum
       "info"
     );
 
@@ -88,7 +82,7 @@ async function main() {
     console.log(chalk.white(`   ${state.address}`));
     console.log();
 
-    let balance = state.balances[nativeToken()] || 0n;
+    let balance = state.balances[nativeToken().raw] || 0n;
 
     if (balance === 0n) {
       console.log(chalk.yellow.bold("💰 Balance: ") + chalk.red.bold("0 DUST"));
@@ -128,7 +122,7 @@ async function main() {
       "managed",
       contractName,
       "contract",
-      "index.cjs"
+      "index.js"
     );
 
     const ATokenModule = await import(contractModulePath);
@@ -164,28 +158,32 @@ async function main() {
     const walletState = await Rx.firstValueFrom(wallet.state());
 
     const walletProvider = {
-      coinPublicKey: walletState.coinPublicKey,
-      encryptionPublicKey: walletState.encryptionPublicKey,
-      balanceTx(tx: any, newCoins: any) {
-        return wallet
+      getCoinPublicKey: () => walletState.coinPublicKey,
+      getEncryptionPublicKey: () => walletState.encryptionPublicKey,
+      async balanceTx(tx: any, newCoins?: any, ttl?: Date): Promise<any> {
+        // v3.0.0: balanceTx should return BalancedProvingRecipe
+        // The deployContract function handles the recipe internally
+        const networkIdStr = networkId as any; // NetworkId type for transaction serialization
+        const zswapTx = await wallet
           .balanceTransaction(
             ZswapTransaction.deserialize(
-              tx.serialize(getLedgerNetworkId()),
-              getZswapNetworkId()
+              tx.serialize(networkIdStr),
+              networkIdStr
             ),
             newCoins
           )
-          .then((tx) => wallet.proveTransaction(tx))
-          .then((zswapTx) =>
-            Transaction.deserialize(
-              zswapTx.serialize(getZswapNetworkId()),
-              getLedgerNetworkId()
-            )
-          )
-          .then(createBalancedTx);
+          .then((tx) => wallet.proveTransaction(tx));
+        
+        // v3.0.0: Transaction.deserialize signature changed - return zswapTx directly
+        // The contract deployment functions will handle the conversion
+        // Return as NothingToProve since transaction is already proven
+        return {
+          type: 'NothingToProve',
+          transaction: zswapTx as any // Transaction type - conversion handled by SDK
+        };
       },
-      submitTx(tx: any) {
-        return wallet.submitTransaction(tx);
+      async submitTx(tx: any): Promise<string> {
+        return await wallet.submitTransaction(tx);
       },
     };
 

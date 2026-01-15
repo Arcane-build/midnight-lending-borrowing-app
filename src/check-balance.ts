@@ -1,12 +1,6 @@
 import "dotenv/config";
 import { WalletBuilder } from "@midnight-ntwrk/wallet";
-import {
-  NetworkId,
-  setNetworkId,
-  getZswapNetworkId,
-  getLedgerNetworkId,
-} from "@midnight-ntwrk/midnight-js-network-id";
-import { nativeToken } from "@midnight-ntwrk/ledger";
+import { nativeToken } from "@midnight-ntwrk/ledger-v6";
 import { WebSocket } from "ws";
 import * as Rx from "rxjs";
 import chalk from "chalk";
@@ -15,9 +9,6 @@ import { EnvironmentManager } from "./utils/environment.js";
 // Fix WebSocket for Node.js environment
 // @ts-ignore
 globalThis.WebSocket = WebSocket;
-
-// Configure for Midnight Testnet
-setNetworkId(NetworkId.TestNet);
 
 async function checkBalance() {
   try {
@@ -37,6 +28,7 @@ async function checkBalance() {
 
     // Get network configuration
     const networkConfig = EnvironmentManager.getNetworkConfig();
+    const networkId = process.env.MIDNIGHT_NETWORK || "preview";
 
     // Build wallet from seed
     const wallet = await WalletBuilder.buildFromSeed(
@@ -45,7 +37,7 @@ async function checkBalance() {
       networkConfig.proofServer,
       networkConfig.node,
       seed,
-      getZswapNetworkId(),
+      networkId as any, // NetworkId type - wallet package may still expect enum
       "info"
     );
 
@@ -57,7 +49,7 @@ async function checkBalance() {
     console.log(chalk.white(`   ${state.address}`));
     console.log();
 
-    const balance = state.balances[nativeToken()] || 0n;
+    const balance = state.balances[nativeToken().raw] || 0n;
 
     if (balance === 0n) {
       console.log(chalk.yellow.bold("💰 Balance: ") + chalk.red.bold("0 DUST"));
