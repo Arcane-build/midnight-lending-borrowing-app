@@ -1,7 +1,7 @@
 import "dotenv/config";
 import * as readline from "readline/promises";
 import { WalletBuilder } from "@midnight-ntwrk/wallet";
-import { findDeployedContract } from "@midnight-ntwrk/midnight-js-contracts";
+import { findDeployedContract, submitCallTx } from "@midnight-ntwrk/midnight-js-contracts";
 import {
   getNetworkId,
 } from "@midnight-ntwrk/midnight-js-network-id";
@@ -193,10 +193,14 @@ async function main() {
             const assetBytes = Buffer.from(depositAsset, "hex");
             const onBehalfOfBytes = Buffer.from(depositOnBehalfOf, "hex");
             
-            // Witness functions (depositAmount, userSecretKey, currentTimestamp) will be called automatically
-            const result = await deployed.callTx.deposit(assetBytes, onBehalfOfBytes);
+            // Use high-level submitCallTx function (matching migration example)
+            const result = await submitCallTx(providers, {
+              contract: contractInstance,
+              circuit: "deposit",
+              args: [assetBytes, onBehalfOfBytes],
+            } as any);
             console.log("✅ Deposit successful!");
-            console.log(`Transaction ID: ${result.txId}\n`);
+            console.log(`Transaction ID: ${(result as any).txId}\n`);
           } catch (error) {
             console.error("❌ Failed to deposit:", error);
           }
@@ -213,10 +217,14 @@ async function main() {
             const assetBytes = Buffer.from(withdrawAsset, "hex");
             const toBytes = Buffer.from(withdrawTo, "hex");
             
-            // Witness functions (withdrawAmount, userSecretKey, currentTimestamp) will be called automatically
-            const result = await deployed.callTx.withdraw(assetBytes, toBytes);
+            // Use high-level submitCallTx function (matching migration example)
+            const result = await submitCallTx(providers, {
+              contract: contractInstance,
+              circuit: "withdraw",
+              args: [assetBytes, toBytes],
+            } as any);
             console.log("✅ Withdrawal successful!");
-            console.log(`Transaction ID: ${result.txId}\n`);
+            console.log(`Transaction ID: ${(result as any).txId}\n`);
           } catch (error) {
             console.error("❌ Failed to withdraw:", error);
           }
@@ -231,10 +239,14 @@ async function main() {
             }
             const assetBytes = Buffer.from(borrowAsset, "hex");
             // InterestRateMode.VARIABLE = 2
-            // Witness functions (borrowAmount, userSecretKey, currentTimestamp) will be called automatically
-            const result = await deployed.callTx.borrow(assetBytes, 2);
+            // Use high-level submitCallTx function (matching migration example)
+            const result = await submitCallTx(providers, {
+              contract: contractInstance,
+              circuit: "borrow",
+              args: [assetBytes, 2],
+            } as any);
             console.log("✅ Borrow successful!");
-            console.log(`Transaction ID: ${result.txId}\n`);
+            console.log(`Transaction ID: ${(result as any).txId}\n`);
           } catch (error) {
             console.error("❌ Failed to borrow:", error);
           }
@@ -249,10 +261,14 @@ async function main() {
             }
             const assetBytes = Buffer.from(repayAsset, "hex");
             // InterestRateMode.VARIABLE = 2
-            // Witness functions (repayAmount, userSecretKey, currentTimestamp) will be called automatically
-            const result = await deployed.callTx.repay(assetBytes, 2);
+            // Use high-level submitCallTx function (matching migration example)
+            const result = await submitCallTx(providers, {
+              contract: contractInstance,
+              circuit: "repay",
+              args: [assetBytes, 2],
+            } as any);
             console.log("✅ Repayment successful!");
-            console.log(`Transaction ID: ${result.txId}\n`);
+            console.log(`Transaction ID: ${(result as any).txId}\n`);
           } catch (error) {
             console.error("❌ Failed to repay:", error);
           }
