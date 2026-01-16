@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { NetworkConfig } from "../providers/midnight-providers.js";
+import { type EnvironmentConfiguration } from "@midnight-ntwrk/testkit-js";
 
 export class EnvironmentManager {
   static getNetworkConfig(): NetworkConfig {
@@ -54,5 +55,23 @@ export class EnvironmentManager {
     const contractModulePath = path.join(contractPath, "contract", "index.js");
 
     return fs.existsSync(keysPath) && fs.existsSync(contractModulePath);
+  }
+
+  static getEnvironmentConfiguration(): EnvironmentConfiguration {
+    const networkConfig = this.getNetworkConfig();
+    const networkId = (process.env.MIDNIGHT_NETWORK || "preview") as any; // NetworkId type
+    
+    return {
+      walletNetworkId: networkId,
+      networkId: networkId,
+      indexer: networkConfig.indexer,
+      indexerWS: networkConfig.indexerWS,
+      node: networkConfig.node,
+      nodeWS: networkConfig.indexerWS.replace('/graphql/ws', '').replace('wss://', 'wss://rpc.') || `wss://rpc.${networkId}.midnight.network`,
+      faucet: networkId === 'preview' 
+        ? 'https://faucet.preview.midnight.network/api/request-tokens'
+        : undefined,
+      proofServer: networkConfig.proofServer,
+    };
   }
 }

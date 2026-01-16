@@ -1,18 +1,17 @@
 import "dotenv/config";
 import * as readline from "readline/promises";
-import { WalletBuilder } from "@midnight-ntwrk/wallet";
 import { findDeployedContract, submitCallTx } from "@midnight-ntwrk/midnight-js-contracts";
 import {
   getNetworkId,
 } from "@midnight-ntwrk/midnight-js-network-id";
-import { Transaction } from "@midnight-ntwrk/ledger-v6";
-import { Transaction as ZswapTransaction } from "@midnight-ntwrk/zswap";
 import { WebSocket } from "ws";
 import * as path from "path";
 import * as fs from "fs";
-import * as Rx from "rxjs";
+import chalk from "chalk";
 import { MidnightProviders } from "./providers/midnight-providers.js";
 import { EnvironmentManager } from "./utils/environment.js";
+import { MidnightWalletProvider } from "./midnight-wallet-provider.js";
+import pino from "pino";
 
 // Fix WebSocket for Node.js environment
 // @ts-ignore
@@ -43,27 +42,14 @@ async function main() {
     const contractName =
       deployment.contractName || process.env.CONTRACT_NAME || "lending-pool";
     const walletSeed = process.env.WALLET_SEED!;
-    const networkId = process.env.MIDNIGHT_NETWORK || "preview";
+    const logger = pino({ level: 'info' });
+    const envConfig = EnvironmentManager.getEnvironmentConfiguration();
 
     console.log("Connecting to Midnight network...");
 
-    // Build wallet
-    const wallet = await WalletBuilder.buildFromSeed(
-      networkConfig.indexer,
-      networkConfig.indexerWS,
-      networkConfig.proofServer,
-      networkConfig.node,
-      walletSeed,
-      networkId as any, // NetworkId type - wallet package may still expect enum
-      "info"
-    );
-
-    wallet.start();
-
-    // Wait for sync
-    await Rx.firstValueFrom(
-      wallet.state().pipe(Rx.filter((s) => s.syncProgress?.synced === true))
-    );
+    // Build wallet from seed using FluentWalletBuilder
+    const walletProvider = await MidnightWalletProvider.build(logger, envConfig, walletSeed);
+    await walletProvider.start();
 
     // Load contract
     const contractPath = path.join(process.cwd(), "contracts");
@@ -75,39 +61,6 @@ async function main() {
       "index.js"
     );
     const LendingPoolModule = await import(contractModulePath);
-
-    // Create wallet provider
-    const walletState = await Rx.firstValueFrom(wallet.state());
-
-    const walletProvider = {
-      getCoinPublicKey: () => walletState.coinPublicKey,
-      getEncryptionPublicKey: () => walletState.encryptionPublicKey,
-      async balanceTx(tx: any, newCoins?: any, ttl?: Date): Promise<any> {
-        // v3.0.0: balanceTx should return BalancedProvingRecipe
-        // Contract calls handle the recipe internally
-        const networkIdStr = networkId as any; // NetworkId type for transaction serialization
-        const zswapTx = await wallet
-          .balanceTransaction(
-            ZswapTransaction.deserialize(
-              tx.serialize(networkIdStr),
-              networkIdStr
-            ),
-            newCoins
-          )
-          .then((tx) => wallet.proveTransaction(tx));
-        
-        // v3.0.0: Transaction.deserialize signature changed - return zswapTx directly
-        // The contract call functions will handle the conversion
-        // Return as NothingToProve since transaction is already proven
-        return {
-          type: 'NothingToProve',
-          transaction: zswapTx as any // Transaction type - conversion handled by SDK
-        };
-      },
-      async submitTx(tx: any): Promise<string> {
-        return await wallet.submitTransaction(tx);
-      },
-    };
 
     // Configure providers
     const providers = MidnightProviders.create({
@@ -308,7 +261,7 @@ async function main() {
     }
 
     // Clean up
-    await wallet.close();
+    await walletProvider.stop();
   } catch (error) {
     console.error("\n❌ Error:", error);
   } finally {

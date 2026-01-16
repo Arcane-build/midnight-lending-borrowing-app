@@ -1,5 +1,4 @@
 import "dotenv/config";
-import { WalletBuilder } from "@midnight-ntwrk/wallet";
 import { deployContract } from "@midnight-ntwrk/midnight-js-contracts";
 import { httpClientProofProvider } from "@midnight-ntwrk/midnight-js-http-client-proof-provider";
 import { indexerPublicDataProvider } from "@midnight-ntwrk/midnight-js-indexer-public-data-provider";
@@ -8,37 +7,20 @@ import { levelPrivateStateProvider } from "@midnight-ntwrk/midnight-js-level-pri
 import {
   getNetworkId,
 } from "@midnight-ntwrk/midnight-js-network-id";
-import { nativeToken, Transaction } from "@midnight-ntwrk/ledger-v6";
-import { Transaction as ZswapTransaction } from "@midnight-ntwrk/zswap";
+import { unshieldedToken } from "@midnight-ntwrk/ledger-v6";
 import { WebSocket } from "ws";
 import * as fs from "fs";
 import * as path from "path";
-import * as Rx from "rxjs";
-import { type Wallet } from "@midnight-ntwrk/wallet-api";
 import chalk from "chalk";
 import { MidnightProviders } from "./providers/midnight-providers.js";
 import { EnvironmentManager } from "./utils/environment.js";
+import { MidnightWalletProvider } from "./midnight-wallet-provider.js";
+import { syncWallet, waitForUnshieldedFunds } from "./wallet-utils.js";
+import pino from "pino";
 
 // Fix WebSocket for Node.js environment
 // @ts-ignore
 globalThis.WebSocket = WebSocket;
-
-const waitForFunds = (wallet: Wallet) =>
-  Rx.firstValueFrom(
-    wallet.state().pipe(
-      Rx.tap((state) => {
-        if (state.syncProgress) {
-          console.log(
-            `Sync progress: synced=${state.syncProgress.synced}, sourceGap=${state.syncProgress.lag.sourceGap}, applyGap=${state.syncProgress.lag.applyGap}`
-          );
-        }
-      }),
-      Rx.filter((state) => state.syncProgress?.synced === true),
-      Rx.map((s) => s.balances[nativeToken().raw] ?? 0n),
-      Rx.filter((balance) => balance > 0n),
-      Rx.tap((balance) => console.log(`Wallet funded with balance: ${balance}`))
-    )
-  );
 
 async function main() {
   console.log();
@@ -62,28 +44,24 @@ async function main() {
     }
 
     const walletSeed = process.env.WALLET_SEED!;
+    const logger = pino({ level: 'info' });
+    const envConfig = EnvironmentManager.getEnvironmentConfiguration();
 
-    // Build wallet from seed
+    // Build wallet from seed using FluentWalletBuilder
     console.log("Building wallet...");
-    const wallet = await WalletBuilder.buildFromSeed(
-      networkConfig.indexer,
-      networkConfig.indexerWS,
-      networkConfig.proofServer,
-      networkConfig.node,
-      walletSeed,
-      networkId as any, // NetworkId type - wallet package may still expect enum
-      "info"
+    const walletProvider = await MidnightWalletProvider.build(logger, envConfig, walletSeed);
+    await walletProvider.start();
+
+    // Wait for funds
+    const unshieldedState = await waitForUnshieldedFunds(
+      logger,
+      walletProvider.wallet,
+      envConfig,
+      unshieldedToken(),
+      false, // Don't request from faucet automatically
     );
 
-    wallet.start();
-    const state = await Rx.firstValueFrom(wallet.state());
-
-    console.log(chalk.cyan.bold("📍 Wallet Address:"));
-    console.log(chalk.white(`   ${state.address}`));
-    console.log();
-
-    let balance = state.balances[nativeToken().raw] || 0n;
-
+    const balance = (unshieldedState.balances as any)[unshieldedToken().raw] || 0n;
     if (balance === 0n) {
       console.log(chalk.yellow.bold("💰 Balance: ") + chalk.red.bold("0 DUST"));
       console.log();
@@ -94,21 +72,15 @@ async function main() {
       console.log(chalk.magenta.bold("━".repeat(60)));
       console.log();
       console.log(chalk.white("   1. ") + chalk.cyan("Visit: ") + chalk.underline("https://midnight.network/test-faucet"));
-      console.log(chalk.white("   2. ") + chalk.cyan("Paste your wallet address (shown above)"));
+      console.log(chalk.white("   2. ") + chalk.cyan("Paste your wallet address"));
       console.log(chalk.white("   3. ") + chalk.cyan("Request tokens from the faucet"));
       console.log();
       console.log(chalk.gray("━".repeat(60)));
       console.log(chalk.gray("⏱️  Faucet transactions can take 2-5 minutes to process."));
       console.log(chalk.gray("━".repeat(60)));
       console.log();
-      console.log(chalk.yellow.bold("💡 Options while waiting:"));
-      console.log(chalk.white("   • ") + chalk.cyan("Let this script wait (it will auto-detect when funds arrive)"));
-      console.log(chalk.white("   • ") + chalk.cyan("OR press ") + chalk.yellow("Ctrl+C") + chalk.cyan(" to stop, then check balance with:"));
-      console.log(chalk.yellow.bold("     npm run check-balance"));
-      console.log(chalk.white("   • ") + chalk.cyan("Once funded, run: ") + chalk.yellow.bold("npm run deploy:token"));
-      console.log();
-      console.log(chalk.blue("⏳ Waiting to receive tokens..."));
-      balance = await waitForFunds(wallet);
+      await walletProvider.stop();
+      process.exit(1);
     }
 
     console.log(chalk.yellow.bold("💰 Balance: ") + chalk.green.bold(`${balance} DUST`));
@@ -154,38 +126,7 @@ async function main() {
       },
     });
 
-    // Create wallet provider for transactions
-    const walletState = await Rx.firstValueFrom(wallet.state());
-
-    const walletProvider = {
-      getCoinPublicKey: () => walletState.coinPublicKey,
-      getEncryptionPublicKey: () => walletState.encryptionPublicKey,
-      async balanceTx(tx: any, newCoins?: any, ttl?: Date): Promise<any> {
-        // v3.0.0: balanceTx should return BalancedProvingRecipe
-        // The deployContract function handles the recipe internally
-        const networkIdStr = networkId as any; // NetworkId type for transaction serialization
-        const zswapTx = await wallet
-          .balanceTransaction(
-            ZswapTransaction.deserialize(
-              tx.serialize(networkIdStr),
-              networkIdStr
-            ),
-            newCoins
-          )
-          .then((tx) => wallet.proveTransaction(tx));
-        
-        // v3.0.0: Transaction.deserialize signature changed - return zswapTx directly
-        // The contract deployment functions will handle the conversion
-        // Return as NothingToProve since transaction is already proven
-        return {
-          type: 'NothingToProve',
-          transaction: zswapTx as any // Transaction type - conversion handled by SDK
-        };
-      },
-      async submitTx(tx: any): Promise<string> {
-        return await wallet.submitTransaction(tx);
-      },
-    };
+    // Wallet provider is already built above
 
     // Configure all required providers
     console.log("Setting up providers...");
@@ -272,8 +213,8 @@ async function main() {
     console.log(chalk.gray("✅ Saved to token-deployment.json"));
     console.log();
 
-    // Close wallet connection
-    await wallet.close();
+    // Stop wallet provider
+    await walletProvider.stop();
   } catch (error) {
     console.log();
     console.log(chalk.red.bold("❌ Deployment Failed:"));

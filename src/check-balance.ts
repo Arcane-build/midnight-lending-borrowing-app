@@ -1,16 +1,20 @@
 import "dotenv/config";
-import { WalletBuilder } from "@midnight-ntwrk/wallet";
-import { nativeToken } from "@midnight-ntwrk/ledger-v6";
+import { unshieldedToken } from "@midnight-ntwrk/ledger-v6";
 import { WebSocket } from "ws";
 import * as Rx from "rxjs";
 import chalk from "chalk";
 import { EnvironmentManager } from "./utils/environment.js";
+import { MidnightWalletProvider } from "./midnight-wallet-provider.js";
+import { waitForUnshieldedFunds, getInitialShieldedState } from "./wallet-utils.js";
+import pino from "pino";
 
 // Fix WebSocket for Node.js environment
 // @ts-ignore
 globalThis.WebSocket = WebSocket;
 
 async function checkBalance() {
+  const providersToBeStopped: MidnightWalletProvider[] = [];
+
   try {
     console.log();
     console.log(chalk.blue.bold("━".repeat(60)));
@@ -27,29 +31,31 @@ async function checkBalance() {
     console.log();
 
     // Get network configuration
-    const networkConfig = EnvironmentManager.getNetworkConfig();
-    const networkId = process.env.MIDNIGHT_NETWORK || "preview";
+    const logger = pino({ level: 'info' });
+    const envConfig = EnvironmentManager.getEnvironmentConfiguration();
 
-    // Build wallet from seed
-    const wallet = await WalletBuilder.buildFromSeed(
-      networkConfig.indexer,
-      networkConfig.indexerWS,
-      networkConfig.proofServer,
-      networkConfig.node,
-      seed,
-      networkId as any, // NetworkId type - wallet package may still expect enum
-      "info"
+    // Build wallet from seed using FluentWalletBuilder
+    const walletProvider = await MidnightWalletProvider.build(logger, envConfig, seed);
+    providersToBeStopped.push(walletProvider);
+    await walletProvider.start();
+
+    // Wait for funds and get state
+    const unshieldedState = await waitForUnshieldedFunds(
+      logger,
+      walletProvider.wallet,
+      envConfig,
+      unshieldedToken(),
+      false, // Don't request from faucet automatically
     );
 
-    wallet.start();
-
-    const state = await Rx.firstValueFrom(wallet.state());
+    const shieldedState = await getInitialShieldedState(logger, walletProvider.wallet.shielded as any);
+    const address = shieldedState.address.coinPublicKeyString();
 
     console.log(chalk.cyan.bold("📍 Wallet Address:"));
-    console.log(chalk.white(`   ${state.address}`));
+    console.log(chalk.white(`   ${address}`));
     console.log();
 
-    const balance = state.balances[nativeToken().raw] || 0n;
+    const balance = (unshieldedState.balances as any)[unshieldedToken().raw] || 0n;
 
     if (balance === 0n) {
       console.log(chalk.yellow.bold("💰 Balance: ") + chalk.red.bold("0 DUST"));
@@ -85,7 +91,6 @@ async function checkBalance() {
     }
 
     console.log();
-    wallet.close();
     process.exit(0);
   } catch (error) {
     console.log();
@@ -93,6 +98,10 @@ async function checkBalance() {
     console.error(chalk.red(error instanceof Error ? error.message : String(error)));
     console.log();
     process.exit(1);
+  } finally {
+    for (const provider of providersToBeStopped) {
+      await provider.stop();
+    }
   }
 }
 
