@@ -28,10 +28,15 @@ export class MidnightProviders {
       config.contractName
     );
 
+    const storeName = config.privateStateStoreName || `${config.contractName}-state`;
+
     return {
       privateStateProvider: levelPrivateStateProvider({
-        privateStateStoreName:
-          config.privateStateStoreName || `${config.contractName}-state`,
+        midnightDbName: "midnight-db",
+        privateStateStoreName: storeName,
+        signingKeyStoreName: "signing-keys",
+        privateStoragePasswordProvider: async () => process.env.STORAGE_PASSWORD || "",
+        walletProvider: config.walletProvider,
       }),
       publicDataProvider: indexerPublicDataProvider(
         config.networkConfig.indexer,
