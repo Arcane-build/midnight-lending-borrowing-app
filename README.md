@@ -3,7 +3,6 @@
 A Midnight Network application created with `create-mn-app`.
 
 ---
-
 ## Privacy Architecture Overview
 
 *A private lending and borrowing protocol built on Midnight*
@@ -19,6 +18,26 @@ This document outlines how the protocol uses Midnight's privacy primitives to de
 ### Architecture at a glance
 
 State is split cleanly into two layers. Anything the market needs to agree on globally lives in public state. Anything tied to an individual user lives in private state on that user's device.
+
+```mermaid
+flowchart LR
+    subgraph Client["🔒 Client Device (Private)"]
+        PS["Private State<br/>• Supplied amounts<br/>• Borrowed amounts<br/>• Scaled balances<br/>• Health inputs<br/>• Commitments & nullifiers"]
+        PROVER["ZK Prover"]
+        PS --> PROVER
+    end
+
+    subgraph Chain["🌐 Midnight Chain (Public)"]
+        POOL["Public Pool State<br/>• Total supplied<br/>• Total borrowed<br/>• Liquidity / borrow indices<br/>• Oracle prices<br/>• Risk parameters"]
+        VERIFIER["ZK Verifier"]
+        VERIFIER --> POOL
+    end
+
+    PROVER -- "ZK proof<br/>(no private data)" --> VERIFIER
+
+    style Client fill:#eef4ff,stroke:#1a1a40,stroke-width:2px
+    style Chain fill:#fff7ed,stroke:#1a1a40,stroke-width:2px
+```
 
 | Public state (on-chain) | Private state (client-side) |
 |---|---|
@@ -40,6 +59,52 @@ State is split cleanly into two layers. Anything the market needs to agree on gl
 
 **Viewing keys (roadmap).** Viewing keys enable opt-in, read-only disclosure to auditors, regulators, or institutional counterparties — a compliance pathway that transparent DeFi structurally cannot offer.
 
+### Deposit flow
+
+```mermaid
+sequenceDiagram
+    participant U as User Wallet
+    participant P as Private State
+    participant Z as ZK Prover
+    participant C as Lending Pool Contract
+    participant L as Public Ledger
+
+    U->>P: Read current supply balance
+    U->>Z: Build proof: "own X of asset A,<br/>new balance = old + X"
+    Z-->>U: Compact proof
+    U->>C: submit(deposit, proof, X, asset A)
+    C->>C: Verify proof
+    C->>L: Increment pool total for A
+    C->>L: Update liquidity index
+    C-->>U: Commitment receipt
+    U->>P: Update private scaled balance
+    Note over P,L: Amount X is never revealed on-chain
+```
+
+### Borrow flow
+
+```mermaid
+sequenceDiagram
+    participant U as User Wallet
+    participant P as Private State
+    participant Z as ZK Prover
+    participant O as Oracle (Public)
+    participant C as Lending Pool Contract
+    participant L as Public Ledger
+
+    U->>O: Read oracle price (public)
+    U->>P: Read collateral & existing debt
+    U->>Z: Build proof:<br/>"collateral × price × LTV ≥ new debt"
+    Z-->>U: Compact proof
+    U->>C: submit(borrow, proof, amount)
+    C->>C: Verify proof
+    C->>L: Increment pool borrow total
+    C->>L: Update borrow index
+    C-->>U: Shielded funds output
+    U->>P: Update private debt balance
+    Note over P,L: Collateral size, debt size,<br/>and health factor never revealed
+```
+
 ### User flow summary
 
 | Action | What the ZK proof asserts | Public effect |
@@ -51,7 +116,28 @@ State is split cleanly into two layers. Anything the market needs to agree on gl
 
 ### Liquidation design
 
-Liquidations are the genuinely hard problem in a private money market: the system needs to act on unhealthy positions without making all positions globally visible. The current approach combines periodic health proofs from borrowers with conditional disclosure triggered by oracle movements, allowing a keeper set to act on positions that drop below threshold. This remains an active area of design and will be refined as C2C unlocks richer contract interactions.
+Liquidations are the genuinely hard problem in a private money market: the system needs to act on unhealthy positions without making all positions globally visible. The current approach combines periodic health proofs from borrowers with conditional disclosure triggered by oracle movements, allowing a keeper set to act on positions that drop below threshold.
+
+```mermaid
+flowchart TD
+    A[Borrower holds private position] --> B{Health proof submitted<br/>within window?}
+    B -- Yes --> C[Position stays fully private]
+    B -- No --> D[Position enters<br/>disclosable state]
+
+    A --> E{Oracle price crosses<br/>risk threshold?}
+    E -- No --> C
+    E -- Yes --> D
+
+    D --> F[Keeper set reads<br/>disclosable position]
+    F --> G[Keeper submits<br/>liquidation proof]
+    G --> H[Partial repayment +<br/>collateral transfer]
+
+    style C fill:#e6f4ea,stroke:#1a7f37
+    style D fill:#fff4e5,stroke:#b4540a
+    style H fill:#fce8e6,stroke:#b3261e
+```
+
+This remains an active area of design and will be refined as C2C unlocks richer contract interactions.
 
 ### Development stack
 
@@ -71,80 +157,3 @@ Several core interactions — notably those that need one circuit to atomically 
 - Integrate C2C as soon as it ships and migrate the test harness to on-chain flows.
 - Finalize the liquidation mechanism and publish its security rationale.
 - Scope viewing-key integration for an institutional pilot.
-
----
-
-## Getting Started
-
-### Prerequisites
-
-- Node.js 22+ installed
-- Docker installed (for proof server)
-
-### Quick Start
-
-1. **Install dependencies**:
-```bash
-   npm install
-```
-2. **Setup and deploy**:
-```bash
-   npm run setup
-```
-   This will:
-   - Compile your Compact contract
-   - Build TypeScript to JavaScript
-   - Deploy contract to the testnet
-3. **Interact with your contract**:
-```bash
-   npm run cli
-```
-
-### Available Scripts
-
-**Lending Pool:**
-- `npm run compile` - Compile lending pool contract
-- `npm run deploy` - Deploy lending pool to testnet
-
-**AToken:**
-- `npm run compile:token` - Compile AToken contract
-- `npm run deploy:token` - Deploy AToken to testnet
-
-**General:**
-- `npm run setup` - Compile, build, and deploy lending pool
-- `npm run compile:all` - Compile all contracts (pool + token)
-- `npm run build` - Build TypeScript
-- `npm run cli` - Interactive CLI for lending pool
-- `npm run check-balance` - Check wallet balance
-- `npm run reset` - Reset all compiled/built files
-- `npm run reset:all` - Reset all files including token deployments
-- `npm run clean` - Clean build artifacts
-- `npm run validate:all` - Validate TypeScript and compile all contracts
-
-### Environment Variables
-
-Copy `.env.example` to `.env` and configure:
-
-**Required:**
-- `WALLET_SEED` - Your 64-character wallet seed (auto-generated)
-- `MIDNIGHT_NETWORK` - Network to use (testnet, default: testnet)
-- `PROOF_SERVER_URL` - Proof server URL (default: http://127.0.0.1:6300)
-
-**Optional:**
-- `CONTRACT_NAME` - Lending pool contract name (default: lending-pool)
-- `TOKEN_CONTRACT_NAME` - AToken contract name (default: atoken)
-- `TOKEN_NAME` - Token name for deployment (default: aToken)
-- `TOKEN_SYMBOL` - Token symbol for deployment (default: aTKN)
-- `TOKEN_DECIMALS` - Token decimals (default: 18)
-
-### Getting Testnet Tokens
-
-1. Run `npm run deploy` to see your wallet address
-2. Visit [https://midnight.network/test-faucet](https://midnight.network/test-faucet)
-3. Enter your address to receive test tokens
-
-### Learn More
-
-- [Midnight Documentation](https://docs.midnight.network)
-- [Compact Language Guide](https://docs.midnight.network/compact)
-- [Tutorial Series](https://docs.midnight.network/tutorials)
